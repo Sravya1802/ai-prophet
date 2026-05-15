@@ -14,6 +14,7 @@ from .client import (
 from .client_models import (
     CandidatesResponse,
     ClaimTickResponse,
+    CompleteExperimentResponse,
     CompleteTickResponse,
     CreateExperimentResponse,
     FillData,
@@ -88,6 +89,7 @@ __all__ = [
     "APIClientError",
     "CandidatesResponse",
     "ClaimTickResponse",
+    "CompleteExperimentResponse",
     "CompleteTickResponse",
     "CreateExperimentResponse",
     "FillData",

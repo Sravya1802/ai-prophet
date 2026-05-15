@@ -18,6 +18,7 @@ from .client_models import (
     CandidatesResponse,
     ClaimTickRequest,
     ClaimTickResponse,
+    CompleteExperimentResponse,
     CompleteTickResponse,
     CreateExperimentRequest,
     CreateExperimentResponse,
@@ -461,6 +462,13 @@ class ServerAPIClient:
         response = self._get("/forecast/scores")
         payload = response.json()
         return [ForecastScoreEntry.model_validate(item) for item in payload]
+
+    def complete_experiment(self, experiment_id: str) -> CompleteExperimentResponse:
+        """Force-stop a tick-mode experiment before its ``n_ticks`` budget
+        is exhausted. Idempotent.
+        """
+        response = self._post(f"/experiments/{experiment_id}:complete")
+        return self._parse_response(response, CompleteExperimentResponse)
 
     # --- Utilities ------------------------------------------------------------
 

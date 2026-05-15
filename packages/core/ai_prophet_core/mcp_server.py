@@ -25,12 +25,14 @@ mcp = FastMCP(
     instructions=(
         "You are connected to Prophet Arena, a platform for trading on real "
         "prediction markets. There are two modes:\n\n"
-        "BENCHMARK MODE (evaluating models): health_check -> create_experiment "
-        "-> add_participant -> claim_tick -> get_markets -> submit_trades -> "
-        "finalize_tick -> (repeat). Each tick is a 15-minute decision window.\n\n"
-        "AGENT MODE (quick exploration): get_current_markets to browse markets, "
-        "forecast_to_trade to bet from a probability, and place_trade for direct "
-        "execution."
+        "BENCHMARK MODE (evaluating models on a deterministic clock): "
+        "health_check -> create_experiment -> add_participant -> claim_tick "
+        "-> get_markets -> submit_trades -> finalize_tick -> (repeat). Each "
+        "tick is a 15-minute decision window; results are comparable across "
+        "models.\n\n"
+        "BETTING MODE (Kalshi exchange execution): get_current_markets to "
+        "browse, forecast_to_trade to bet from a probability, place_trade "
+        "for direct execution (paper or live based on engine config)."
     ),
 )
 
@@ -294,6 +296,19 @@ def get_reasoning(
     with _get_client() as api:
         resp = api.get_reasoning(experiment_id, participant_idx, limit)
         return _model_to_dict(resp)
+
+
+# ---------------------------------------------------------------------------
+# Experiment lifecycle (force-stop)
+# ---------------------------------------------------------------------------
+
+@mcp.tool
+def complete_experiment(experiment_id: str) -> dict:
+    """Force-stop a benchmark experiment before its ``n_ticks`` budget is
+    exhausted. Idempotent.
+    """
+    with _get_client() as api:
+        return _model_to_dict(api.complete_experiment(experiment_id))
 
 
 # ---------------------------------------------------------------------------
