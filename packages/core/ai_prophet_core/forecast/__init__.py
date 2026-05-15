@@ -1,17 +1,15 @@
-"""Forecast module - event retrieval, prediction schemas, and evaluation."""
+"""Forecast module - dataset retrieval, prediction schemas, and evaluation."""
 
+from .dataset_retrieve import retrieve_dataset_events
 from .evaluate import load_actuals, load_submission, score
-from .kalshi_client import KalshiForecastClient
-from .retrieve import select_events
 from .schemas import Event, Prediction, Submission
 
 __all__ = [
     "Event",
-    "KalshiForecastClient",
     "Prediction",
     "Submission",
     "load_actuals",
     "load_submission",
+    "retrieve_dataset_events",
     "score",
-    "select_events",
 ]

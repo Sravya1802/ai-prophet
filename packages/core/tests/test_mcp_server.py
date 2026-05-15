@@ -89,6 +89,10 @@ def test_get_current_markets_uses_market_snapshot_fields(monkeypatch):
     assert result["market_count"] == 1
 
 
+def test_forecast_submission_tool_is_not_exposed():
+    assert not hasattr(mcp_server, "submit_forecast")
+
+
 def test_get_betting_engine_uses_db_backing(monkeypatch):
     captured: dict[str, object] = {}
     calls = {"db": 0, "engine": 0}

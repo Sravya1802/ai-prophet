@@ -308,19 +308,6 @@ class ForecastEventResponse(BaseModel):
     resolved_at: datetime | None = None
 
 
-class ForecastSubmitRequest(BaseModel):
-    """Request body for submitting predictions."""
-    predictions: list[dict]
-
-
-class ForecastSubmitResponse(BaseModel):
-    """Response after submitting predictions."""
-    submission_id: int
-    team_name: str
-    n_predictions: int
-    submitted_at: datetime
-
-
 class ForecastRegisterTeamRequest(BaseModel):
     """Request body for registering a team (with optional endpoint)."""
     team_name: str

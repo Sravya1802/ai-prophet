@@ -9,7 +9,7 @@ The `prophet` CLI is the entrypoint for the AI Prophet ecosystem.
 It currently exposes two public namespaces:
 
 - `prophet trade` for Prophet Arena trade benchmark runs
-- `prophet forecast` for forecast retrieval, registration, prediction, submission, and leaderboard access
+- `prophet forecast` for forecast retrieval, team registration, local prediction, evaluation, and leaderboard access
 
 ## Installation
 
@@ -20,6 +20,7 @@ python -m pip install ai-prophet
 For local development from this repository:
 
 ```bash
+python -m pip install -e ../ai-prophet-datasets/sdk
 python -m pip install -e packages/core
 python -m pip install -e "packages/cli[dev]"
 ```
@@ -82,23 +83,28 @@ prophet trade progress <experiment_id>  # Show experiment progress
 prophet trade dashboard               # Open local results dashboard
 
 prophet forecast                      # Show forecast subcommand help
-prophet forecast retrieve ...         # Build an event slate from Kalshi
+prophet forecast retrieve             # Fetch the latest dataset-backed event slate
 prophet forecast events ...           # List server-backed forecast events
 prophet forecast register ...         # Register a team and optional endpoint
-prophet forecast predict ...          # Produce a submission locally or via HTTP
-prophet forecast submit ...           # Submit predictions to the server
+prophet forecast predict ...          # Produce a local predictions file via module or HTTP
 prophet forecast leaderboard          # View the forecast leaderboard
-prophet forecast evaluate ...         # Score a submission locally
+prophet forecast evaluate ...         # Score a predictions file locally
 ```
 
 ## Forecast Workflow
 
 ```bash
-# Option A: fetch the current forecast slate from the server
-prophet forecast events -o events.json
+# Option A: fetch the latest hackathon slate from ai-prophet-datasets
+prophet forecast retrieve -o events.json
 
-# Option B: build a daily slate directly from Kalshi
-prophet forecast retrieve --deadline 2026-03-15T23:59:59Z -o events.json
+# Optional: pin a specific dataset release
+prophet forecast retrieve \
+  --dataset hackathon-day \
+  --release 2026-05-12 \
+  -o events.json
+
+# Option B: fetch the current forecast slate from the server
+prophet forecast events -o events.json
 
 # Register a team and optional hosted prediction endpoint
 prophet forecast register \
@@ -110,14 +116,19 @@ prophet forecast predict \
   --events events.json \
   --local ai_prophet.forecast.example_agent
 
-# Submit the resulting file and inspect the leaderboard
-prophet forecast submit --submission submission.json
+# Inspect the leaderboard
 prophet forecast leaderboard
 ```
 
-`events`, `register`, `submit`, and `leaderboard` talk to the Prophet Arena
-forecast API and require `PA_SERVER_API_KEY`. `retrieve`, `predict`, and
-`evaluate` can run locally.
+`events`, `register`, and `leaderboard` talk to the Prophet Arena forecast API
+and require `PA_SERVER_API_KEY`. `retrieve`, `predict`, and `evaluate` can run
+locally. The public CLI does not submit team predictions to the Prophet Arena
+database; `predict` only writes a local file for development and local scoring.
+
+`forecast retrieve` reads from the public `ai-prophet-datasets` registry.
+Organizers can set `PA_FORECAST_DATASET` and `PA_FORECAST_RELEASE` to make the
+no-flag command point at a specific release. Teams can also pass
+`--repo-path ../ai-prophet-datasets` when testing against a local clone.
 
 ## Supported LLM Providers
 
@@ -168,6 +179,11 @@ implicitly load `.env` files.
 | `BRAVE_API_KEY` | Brave Search API key (optional, for web search) |
 | `PA_SERVER_URL` | Override API URL |
 | `PA_SERVER_API_KEY` | Core API key for authenticated benchmark requests |
+| `PA_FORECAST_DATASET` | Default dataset for `prophet forecast retrieve` (default: `hackathon-day`) |
+| `PA_FORECAST_RELEASE` | Optional default release id; omitted means latest open release |
+| `PA_FORECAST_DATASET_BRANCH` | Dataset registry branch or commit sha (default: `main`) |
+| `PA_FORECAST_DATASETS_REPO_PATH` | Optional local clone for dataset reads |
+| `PA_FORECAST_DATASETS_REPO_URL` | Optional dataset registry repo URL override |
 | `PA_VERBOSE` | Enable verbose LLM logging |
 | `PA_MEMORY_DIR` | Local reasoning memory directory (default `~/.pa_memory`) |
 | `PA_MEMORY_MAX_ROWS` | Max JSONL memory rows per participant (default `1000`) |

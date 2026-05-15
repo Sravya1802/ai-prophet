@@ -29,8 +29,8 @@ mcp = FastMCP(
         "-> add_participant -> claim_tick -> get_markets -> submit_trades -> "
         "finalize_tick -> (repeat). Each tick is a 15-minute decision window.\n\n"
         "AGENT MODE (quick exploration): get_current_markets to browse markets, "
-        "forecast_to_trade to bet from a probability, place_trade for direct "
-        "execution, submit_forecast for the leaderboard."
+        "forecast_to_trade to bet from a probability, and place_trade for direct "
+        "execution."
     ),
 )
 
@@ -331,17 +331,6 @@ def get_current_markets() -> dict:
             "market_count": resp.market_count,
             "markets": markets,
         }
-
-
-@mcp.tool
-def submit_forecast(predictions: list[dict]) -> dict:
-    """Submit probability predictions to the forecast leaderboard.
-
-    Each prediction needs: market_ticker, p_yes (0-1), rationale (optional).
-    Team is resolved from the API key.
-    """
-    with _get_client() as api:
-        return _model_to_dict(api.submit_forecast(predictions))
 
 
 # ---------------------------------------------------------------------------

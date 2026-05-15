@@ -29,8 +29,6 @@ from .client_models import (
     ForecastRegisterTeamRequest,
     ForecastRegisterTeamResponse,
     ForecastScoreEntry,
-    ForecastSubmitRequest,
-    ForecastSubmitResponse,
     HealthResponse,
     MarketSnapshot,
     PlanRequest,
@@ -421,15 +419,6 @@ class ServerAPIClient:
         response = self._get("/forecast/events", params={"status": status})
         payload = response.json()
         return [ForecastEventResponse.model_validate(item) for item in payload]
-
-    def submit_forecast(
-        self,
-        predictions: list[dict],
-    ) -> ForecastSubmitResponse:
-        """Submit predictions for open forecast events. Team is resolved from the API key."""
-        req = ForecastSubmitRequest(predictions=predictions)
-        response = self._post("/forecast/submit", json=req.model_dump(mode="json"))
-        return self._parse_response(response, ForecastSubmitResponse)
 
     def register_forecast_team(
         self,

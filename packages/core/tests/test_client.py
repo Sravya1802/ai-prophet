@@ -29,6 +29,12 @@ def test_constructor_overrides_are_respected():
     assert client.retry_backoff == 0.25
 
 
+def test_forecast_submission_method_is_not_exposed():
+    client = ServerAPIClient("https://example.test")
+
+    assert not hasattr(client, "submit_forecast")
+
+
 def test_http_client_includes_api_key_header():
     client = ServerAPIClient("https://example.test", api_key="test-key")
     assert client.client.headers["X-API-Key"] == "test-key"

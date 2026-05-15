@@ -98,19 +98,6 @@ result = engine.trade_from_forecast(
 Set `paper=False` for real orders. Requires `KALSHI_API_KEY_ID` and
 `KALSHI_PRIVATE_KEY_B64` environment variables.
 
-## Submit Forecasts
-
-Submit probability predictions to the Prophet Arena forecast leaderboard.
-
-```python
-from ai_prophet_core import ServerAPIClient
-
-with ServerAPIClient(base_url="...", api_key="prophet_...") as api:
-    api.submit_forecast(predictions=[
-        {"market_ticker": "TICKER-123", "p_yes": 0.72, "rationale": "Based on..."},
-    ])
-```
-
 ## MCP Server
 
 Exposes all of the above as MCP tools for Claude Desktop, Cursor, etc.
@@ -122,8 +109,7 @@ prophet-mcp
 
 Tools: `health_check`, `create_experiment`, `add_participant`, `claim_tick`,
 `get_progress`, `get_markets`, `submit_trades`, `finalize_tick`, `get_portfolio`,
-`get_reasoning`, `get_current_markets`, `forecast_to_trade`, `place_trade`,
-`submit_forecast`.
+`get_reasoning`, `get_current_markets`, `forecast_to_trade`, `place_trade`.
 
 ## Environment Variables
 

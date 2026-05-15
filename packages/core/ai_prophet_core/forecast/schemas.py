@@ -3,12 +3,13 @@
 from __future__ import annotations
 
 from datetime import datetime
+from typing import Any
 
 from pydantic import BaseModel, Field
 
 
 class Event(BaseModel):
-    """A Kalshi market selected for forecasting."""
+    """An event selected for forecasting."""
 
     event_ticker: str
     market_ticker: str
@@ -18,6 +19,8 @@ class Event(BaseModel):
     category: str
     rules: str | None = None
     close_time: datetime
+    outcomes: list[str] | None = None
+    resolved_outcome: dict[str, Any] | None = None
 
 
 class Prediction(BaseModel):

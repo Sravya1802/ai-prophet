@@ -16,6 +16,7 @@ LLM benchmark client and SDK for Prophet Arena prediction-market evaluation.
 ## Local Setup
 
 ```bash
+python -m pip install -e ../ai-prophet-datasets/sdk
 python -m pip install -e packages/core
 python -m pip install -e "packages/cli[dev]"
 pre-commit install
