@@ -60,7 +60,11 @@ def test_quote_model():
 
 
 def test_trade_intent_model():
-    """Test TradeIntent model."""
+    """TradeIntent accepts arbitrary tick_ts datetimes.
+
+    Tick-boundary enforcement lives at the API layer (``normalize_tick``);
+    the execution model takes whatever the caller supplies.
+    """
     intent = TradeIntent(
         intent_id="intent_1",
         experiment_id="exp_1",
@@ -76,18 +80,19 @@ def test_trade_intent_model():
     assert intent.action == TradeAction.BUY
     assert intent.size > 0
 
-    # Test validation (tick must be on valid tick boundary)
-    with pytest.raises(ValueError):
-        TradeIntent(
-            intent_id="intent_2",
-            experiment_id="exp_1",
-            participant_idx=0,
-            tick_ts=datetime(2024, 1, 15, 14, 7, 0, tzinfo=UTC),
-            market_id="market_123",
-            action=TradeAction.BUY,
-            side=TradeSide.YES,
-            size_type=SizeType.NOTIONAL,
-            size=100.0,
-            submitted_at=datetime(2024, 1, 15, 14, 5, 0, tzinfo=UTC)
-        )
+    # The model accepts off-boundary tick_ts too -- boundary enforcement
+    # is the API layer's job, not the wire model's.
+    off_boundary = TradeIntent(
+        intent_id="intent_2",
+        experiment_id="exp_1",
+        participant_idx=0,
+        tick_ts=datetime(2024, 1, 15, 14, 7, 0, tzinfo=UTC),
+        market_id="market_123",
+        action=TradeAction.BUY,
+        side=TradeSide.YES,
+        size_type=SizeType.NOTIONAL,
+        size=100.0,
+        submitted_at=datetime(2024, 1, 15, 14, 5, 0, tzinfo=UTC)
+    )
+    assert off_boundary.tick_ts.minute == 7
 

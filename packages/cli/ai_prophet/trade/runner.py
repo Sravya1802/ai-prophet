@@ -32,6 +32,7 @@ from ai_prophet_core.client import (
     ServerAPIClient,
     TradeIntentRequest,
 )
+from ai_prophet_core.ruleset import TICK_SUBMISSION_DEADLINE_SECS
 
 from ai_prophet.trade.agent.reasoning_memory import build_memory_context
 from ai_prophet.trade.core.config import ClientConfig
@@ -41,7 +42,11 @@ from ai_prophet.trade.trace import TraceSink
 
 logger = logging.getLogger(__name__)
 
-PARTICIPANT_TICK_BUDGET_SEC = 600
+# Per-participant pipeline budget. Derived from the server's submission
+# deadline so the LLM pipeline always finishes with slack for HTTP I/O
+# (put_plan, submit_intents, finalize) before the server cuts us off.
+_TICK_BUDGET_HTTP_SLACK_SEC = 60
+PARTICIPANT_TICK_BUDGET_SEC = max(60, TICK_SUBMISSION_DEADLINE_SECS - _TICK_BUDGET_HTTP_SLACK_SEC)
 MAX_CONCURRENT_PARTICIPANTS = 4
 TRANSIENT_API_RETRY_SEC = 15
 

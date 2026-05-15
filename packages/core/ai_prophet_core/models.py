@@ -14,9 +14,6 @@ from typing import Any, Literal
 
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
-from ai_prophet_core.ruleset import VALID_TICK_MINUTES
-from ai_prophet_core.time import is_tick_boundary
-
 # --- Enums -------------------------------------------------------------------
 
 class TradeAction(StrEnum):
@@ -142,7 +139,12 @@ class Participant(BaseModel):
 # --- Trade Models -------------------------------------------------------------
 
 class TradeIntent(BaseModel):
-    """Trade intent for internal execution."""
+    """Trade intent for internal execution.
+
+    ``tick_ts`` is the benchmark tick boundary the intent is bound to.
+    Boundary enforcement happens at the API layer (``normalize_tick``);
+    the execution model accepts any datetime upstream callers supply.
+    """
 
     intent_id: str
     experiment_id: str
@@ -154,13 +156,6 @@ class TradeIntent(BaseModel):
     size_type: SizeType
     size: float = Field(gt=0.0)
     submitted_at: datetime
-
-    @field_validator("tick_ts")
-    @classmethod
-    def validate_tick(cls, v: datetime) -> datetime:
-        if not is_tick_boundary(v):
-            raise ValueError(f"tick_ts must be on valid boundary (minutes: {VALID_TICK_MINUTES})")
-        return v
 
 
 class Fill(BaseModel):

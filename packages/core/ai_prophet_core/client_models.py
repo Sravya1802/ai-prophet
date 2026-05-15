@@ -29,6 +29,11 @@ class CreateExperimentResponse(BaseModel):
     created: bool
 
 
+class CompleteExperimentResponse(BaseModel):
+    status: str
+    idempotent: bool
+
+
 class UpsertParticipantRequest(BaseModel):
     model: str
     rep: int = 0
