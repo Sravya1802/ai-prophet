@@ -9,19 +9,21 @@ __pycache__/
 .venv/
 .venv*/
 venv/
-.env
-.env.*
 env/
 
-# Packaging/build
+# Environment / secrets
+.env
+.env.*
+!.env.example
+
+# Packaging / build
 build/
 dist/
 *.egg
 *.egg-info/
 .eggs/
-pip-wheel-metadata/
 
-# Test/cache/tooling
+# Test / cache / tooling
 .pytest_cache/
 .mypy_cache/
 .ruff_cache/
@@ -29,11 +31,11 @@ pip-wheel-metadata/
 .coverage.*
 htmlcov/
 
-# Local data/secrets
+# Local data
 *.db
-.env
-.env.*
+*.log
 
-# OS/editor
+# OS / editor
 .DS_Store
-*.json
+.idea/
+.vscode/

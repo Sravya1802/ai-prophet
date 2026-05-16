@@ -1,41 +1,92 @@
-# ai-prophet
+# ai-prophet — Prophet Hacks 2026 Trading Track
 
-[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![PyPI: ai-prophet-core](https://img.shields.io/badge/PyPI-ai--prophet--core-blue.svg)](https://pypi.org/project/ai-prophet-core/)
-[![PyPI: ai-prophet](https://img.shields.io/badge/PyPI-ai--prophet-blue.svg)](https://pypi.org/project/ai-prophet/)
-[![Discord](https://img.shields.io/badge/Discord-join-blue.svg?logo=discord)](https://discord.gg/aTsY7979zP)
+Our team's submission for the **Prophet Hacks 2026 — Trading Track**. A
+custom paper-trading bot that competes on the Prophet Arena
+prediction-market benchmark and is scored on the combined rank of
+Sharpe ratio and PnL.
 
-LLM benchmark client and SDK for Prophet Arena prediction-market evaluation.
+> Status: scaffolding in place. Strategy implementation is up next.
 
-## Packages
+## Overview
 
-- `packages/core` - typed SDK (`ai-prophet-core`) for API models and client calls
-- `packages/cli` - benchmark runner and CLI package (`ai-prophet`, command `prophet`)
+Prophet Arena runs a 15-minute-tick paper-trading benchmark over a
+curated universe of prediction markets (primarily Kalshi). Each tick is
+a decision window with a deterministic price snapshot: every
+participant sees the same markets and the same prices, and fills are
+deterministic against those pinned prices.
 
-## Docs
+Our bot:
 
-- [Build a trading bot](docs/build_a_bot.md) - end-to-end guide for writing
-  a custom bot against the Prophet Arena benchmark using `ai-prophet-core`
-- [Using the sample datasets](docs/using_sample_datasets.md) - pull a
-  ready-made event slate from `ai-prophet-datasets` via `prophet forecast retrieve`
+- Connects to the Prophet Arena API via the `ai-prophet-core` SDK.
+- Claims each tick, pulls the candidate markets and snapshot quotes,
+  reads its current portfolio, and decides which trades to submit.
+- Uses an LLM (Anthropic Claude) to estimate `P(YES)` for each
+  candidate market and trades when our model disagrees with the
+  market price by more than a configurable edge threshold.
+- Sizes bets with risk caps (per trade, per market, gross exposure)
+  well inside the Prophet Arena ruleset.
 
-## Local Setup
+Scoring constraints we have to satisfy: positive PnL and at least
+14 fills over the evaluation window, with $10,000 starting cash.
+
+## Setup
+
+Requires Python 3.11+.
 
 ```bash
-python -m pip install -e packages/core
-python -m pip install -e "packages/cli[dev]"
-pre-commit install
+git clone https://github.com/Sravya1802/ai-prophet.git
+cd ai-prophet
+
+python3 -m venv .venv
+source .venv/bin/activate
+pip install -r requirements.txt
+
+cp .env.example .env
+# edit .env and fill in PA_SERVER_API_KEY and ANTHROPIC_API_KEY
 ```
 
-## Checks
+Get a Prophet Arena API key from the operators (Discord). The Anthropic
+key comes from <https://console.anthropic.com/>. No Kalshi key is
+needed — Prophet Arena handles the exchange side.
+
+## How to Run
 
 ```bash
-ruff check --config packages/cli/pyproject.toml packages/core packages/cli
-pytest packages/core/tests
-pytest packages/cli/tests
+python bot.py
 ```
 
-## License
+The bot is a long-lived process: it blocks on the next tick claim and
+wakes up every 15 minutes. Logs are written to stdout. To stop, send
+SIGINT (Ctrl-C); the bot can resume by being restarted with the same
+experiment slug.
 
-MIT. See `LICENSE`.
+## Architecture
+
+```
+ai-prophet/
+├── bot.py            # main trading bot (tick loop, strategy entry point)
+├── requirements.txt  # pinned dependencies
+├── .env.example      # template for API keys / config
+├── README.md         # this file
+└── LICENSE           # MIT
+```
+
+The bot has three layers that we will build out:
+
+1. **Session layer** — thin wrapper over `ai_prophet_core`'s
+   `ServerAPIClient` and `BenchmarkSession`. Handles the tick
+   lifecycle: claim → load candidates → put plan → submit intents →
+   finalize → complete.
+2. **Forecast layer** — calls Claude for each candidate market with a
+   structured prompt, parses a JSON forecast (`p_yes`, `confidence`,
+   `rationale`).
+3. **Strategy layer** — combines forecasts with portfolio state and
+   risk caps to produce a small set of trade intents per tick.
+
+Server-enforced rules we have to respect: max 20 trades/tick,
+100/day, 30 open positions, $1,000 max notional per market, $10,000
+max gross exposure, 9-minute submission deadline after each tick.
+
+## Team
+
+- **Sravya1802** — `sravyarl1802@gmail.com`
