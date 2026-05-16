@@ -44,19 +44,29 @@ prophet forecast retrieve \
     -o resolved.json
 ```
 
-Each invocation writes a JSON array of `Event` objects, the same shape
+Each invocation writes a JSON array of `Event` objects (the `Event`
+pydantic model in `ai_prophet_core.forecast.schemas`) — the same shape
 `prophet forecast predict` consumes.
 
 ## The event shape
 
-One row from `sample-sports`:
+`prophet forecast retrieve` normalizes the raw registry rows into the
+`Event` schema before writing them out, so the JSON you read back is
+**not** the same shape as `tasks.jsonl` in the `ai-prophet-datasets`
+repo. The retrieved output is the source of truth — that's what every
+downstream `prophet forecast …` command consumes.
+
+One row from `sample-sports` exactly as it lands in your file:
 
 ```json
 {
-  "task_id": "KXNBAGAME-26MAY15DETCLE",
+  "event_ticker": "KXNBAGAME-26MAY15DETCLE",
+  "market_ticker": "KXNBAGAME-26MAY15DETCLE",
   "title": "Will Cleveland beat Detroit in NBA Eastern Conference Game 6 on May 15, 2026?",
+  "subtitle": null,
+  "description": "If Cleveland wins the Game 6: Detroit at Cleveland professional basketball game originally scheduled for May 15, 2026, then the market resolves to Yes.",
   "category": "Sports",
-  "rules": "If Cleveland wins the Game 6: Detroit at Cleveland professional basketball game ...",
+  "rules": "If Cleveland wins the Game 6: Detroit at Cleveland professional basketball game originally scheduled for May 15, 2026, then the market resolves to Yes.",
   "close_time": "2026-05-15T20:00:00Z",
   "outcomes": ["Cleveland", "Detroit"],
   "resolved_outcome": null
@@ -67,32 +77,70 @@ A resolved row from `sample-resolved`:
 
 ```json
 {
-  "task_id": "KXITFWMATCH-26MAY12NAJEBS",
+  "event_ticker": "KXITFWMATCH-26MAY12NAJEBS",
+  "market_ticker": "KXITFWMATCH-26MAY12NAJEBS",
   "title": "Who won the Najzer vs Ebster tennis match in the 2026 W15 Klagenfurt Round of 32?",
+  "subtitle": null,
+  "description": "If Kaja Najzer wins the Najzer vs Ebster professional tennis match in the 2026 W15 Klagenfurt Round of 32 after a ball has been played, then the market resolves to Yes.",
+  "category": "Sports",
+  "rules": "If Kaja Najzer wins the Najzer vs Ebster professional tennis match in the 2026 W15 Klagenfurt Round of 32 after a ball has been played, then the market resolves to Yes.",
+  "close_time": "2026-05-13T09:58:49Z",
   "outcomes": ["Kaja Najzer", "Anna Lena Ebster"],
-  "context": "some further contexts about this event",
   "resolved_outcome": {
     "value": ["Anna Lena Ebster"],
     "resolved_at": "2026-05-13T17:02:27.064637+00:00",
     "source": "KXITFWMATCH-26MAY12NAJEBS"
-  },
-  "metadata": { ... }
+  }
 }
 ```
 
-A few things worth knowing about the shape:
+Field-by-field:
 
-- `outcomes` is the choice list. Binary questions have two entries
-  (`["Yes", "No"]` or two team names); multi-outcome questions can have
-  20+ (e.g. league champions, award nominees).
-- `resolved_outcome.value` (when exists) is **always a list**, even for single-winner
-  resolutions (`["Anna Lena Ebster"]`, never the bare string). Multi-entry
-  lists express "all of these resolved positive" — e.g. "top 4 finishers"
-  in a league has 4 entries.
-- `rules` is the literal market-resolution criterion. Feed it to your
+- `event_ticker` — stable id of the underlying event in the upstream
+  market source (Kalshi-style ticker). May be shared by multiple markets
+  in the future, but for the current samples it equals `market_ticker`.
+- `market_ticker` — the unique id of this specific market/question.
+  This is the key every other `prophet forecast …` command uses to join
+  predictions, actuals, and submissions back to events.
+- `title` — the human-readable question. Already rewritten to be
+  self-contained (sport, league, date if relevant); safe to put straight
+  into a prompt.
+- `subtitle` — usually `null` for samples; reserved for an optional
+  short qualifier under the title.
+- `description` — longer natural-language description of how the market
+  resolves. For the current samples it's the same string as `rules`;
+  treat either one as the canonical resolution text.
+- `category` — top-level topic (`"Sports"`, `"Entertainment"`,
+  `"Economics"`, `"Elections"`, `"Politics"`, …).
+- `rules` — the literal market-resolution criterion. Feed it to your
   bot's prompt verbatim; don't paraphrase.
-- `close_time` is the deadline for accepting forecasts on that question.
-  `predict` skips events whose `close_time` is already in the past.
+- `close_time` — ISO-8601 UTC deadline for accepting forecasts.
+  `prophet forecast predict` skips events whose `close_time` is already
+  in the past.
+- `outcomes` — the choice list. Binary questions have two entries
+  (`["Yes", "No"]` or two team/contestant names); multi-outcome questions
+  can have 20+ (e.g. league champions, award nominees, IPO date
+  buckets).
+- `resolved_outcome` — `null` for open markets, otherwise an object
+  with:
+  - `value` — **always a list of strings**, drawn from `outcomes`, even
+    when only one outcome resolved positive (`["Anna Lena Ebster"]`,
+    never the bare string). Multi-entry lists express "all of these
+    resolved positive" — e.g. "top 4 finishers" in a league has 4
+    entries.
+  - `resolved_at` — ISO-8601 timestamp of when the upstream source
+    finalized the resolution.
+  - `source` — provenance string identifying which upstream source
+    reported the resolution.
+
+Two things to note if you're cross-referencing the raw `tasks.jsonl`
+files in `ai-prophet-datasets`:
+
+- The raw rows use `task_id` and `predict_by`; these are renamed to
+  `market_ticker` and `close_time` in the retrieved output.
+- The raw rows carry a `metadata` blob (original DB title, category
+  source, etc.). `retrieve` strips it — if you need that provenance,
+  read the JSONL directly from the registry repo.
 
 ## Picking a different release
 
