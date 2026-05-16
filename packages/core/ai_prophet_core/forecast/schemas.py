@@ -39,7 +39,7 @@ class Prediction(BaseModel):
     rationale: str | None = None
 
     @model_validator(mode="after")
-    def _require_forecast(self) -> "Prediction":
+    def _require_forecast(self) -> Prediction:
         if self.p_yes is None and not self.probabilities:
             raise ValueError("Prediction requires p_yes or probabilities")
         return self
