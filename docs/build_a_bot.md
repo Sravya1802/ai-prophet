@@ -217,7 +217,7 @@ directly, read it from `claim_tick`'s response and pass it explicitly.
 
 ### Markets that "vanish"
 
-Polymarket markets can drop out of the eligible universe between ticks.
+Kalshi markets can drop out of the eligible universe between ticks.
 Open positions on a dropped market are excluded from equity until the
 market resolves (or returns). Plan accordingly.
 
