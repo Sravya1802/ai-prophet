@@ -53,8 +53,7 @@ One row from `sample-sports`:
 
 ```json
 {
-  "event_ticker": "KXNBAGAME-26MAY15DETCLE",
-  "market_ticker": "KXNBAGAME-26MAY15DETCLE",
+  "task_id": "KXNBAGAME-26MAY15DETCLE",
   "title": "Will Cleveland beat Detroit in NBA Eastern Conference Game 6 on May 15, 2026?",
   "category": "Sports",
   "rules": "If Cleveland wins the Game 6: Detroit at Cleveland professional basketball game ...",
@@ -68,14 +67,16 @@ A resolved row from `sample-resolved`:
 
 ```json
 {
-  "event_ticker": "KXITFWMATCH-26MAY12NAJEBS",
+  "task_id": "KXITFWMATCH-26MAY12NAJEBS",
   "title": "Who won the Najzer vs Ebster tennis match in the 2026 W15 Klagenfurt Round of 32?",
   "outcomes": ["Kaja Najzer", "Anna Lena Ebster"],
+  "context": "some further contexts about this event",
   "resolved_outcome": {
     "value": ["Anna Lena Ebster"],
     "resolved_at": "2026-05-13T17:02:27.064637+00:00",
     "source": "KXITFWMATCH-26MAY12NAJEBS"
-  }
+  },
+  "metadata": { ... }
 }
 ```
 
@@ -84,7 +85,7 @@ A few things worth knowing about the shape:
 - `outcomes` is the choice list. Binary questions have two entries
   (`["Yes", "No"]` or two team names); multi-outcome questions can have
   20+ (e.g. league champions, award nominees).
-- `resolved_outcome.value` is **always a list**, even for single-winner
+- `resolved_outcome.value` (when exists) is **always a list**, even for single-winner
   resolutions (`["Anna Lena Ebster"]`, never the bare string). Multi-entry
   lists express "all of these resolved positive" — e.g. "top 4 finishers"
   in a league has 4 entries.
