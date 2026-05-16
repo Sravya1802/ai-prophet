@@ -268,9 +268,6 @@ have accumulated. Win rate stays pending until 10 trades resolve.
 - **Plug a custom strategy into the CLI's runner** (to inherit its
   tracing, dashboard, local memory): pass `build_pipeline` to
   `ExperimentRunner`. See `ai-prophet/CORE_AUDIT.md` §5.
-- **Live execution on Kalshi** (real money, not paper): use
-  `ai_prophet_core.betting.BettingEngine` with `KalshiAdapter`. Separate
-  code path from the benchmark.
 
 ## API reference
 

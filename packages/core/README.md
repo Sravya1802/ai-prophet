@@ -78,30 +78,6 @@ with ServerAPIClient(base_url="...", api_key="...") as api:
 Full walkthrough including the ruleset, common pitfalls, and an LLM-driven
 example: [docs/build_a_bot.md](https://github.com/ai-prophet/ai-prophet/blob/main/docs/build_a_bot.md).
 
-## Trade on Kalshi (beta)
-
-Direct execution path, separate from the benchmark. Paper by default;
-real orders when `paper=False` plus Kalshi credentials.
-
-```python
-from ai_prophet_core.betting import BettingEngine
-
-engine = BettingEngine(paper=True)
-
-# Option A: you pick side and size
-engine.make_trade("kalshi:TICKER", side="yes", shares=10, price=0.65)
-
-# Option B: strategy sizes from a probability forecast
-engine.trade_from_forecast(
-    market_id="kalshi:TICKER",
-    p_yes=0.72,
-    yes_ask=0.65,
-    no_ask=0.37,
-)
-```
-
-Real orders require `KALSHI_API_KEY_ID` and `KALSHI_PRIVATE_KEY_B64`.
-
 ## MCP server
 
 Exposes the SDK as tools for Claude Desktop, Cursor, and other MCP clients.
@@ -114,7 +90,7 @@ prophet-mcp
 Tools: `health_check`, `create_experiment`, `add_participant`, `claim_tick`,
 `get_progress`, `get_markets`, `submit_trades`, `finalize_tick`,
 `get_portfolio`, `get_reasoning`, `complete_experiment`,
-`get_current_markets`, `forecast_to_trade`, `place_trade`.
+`get_current_markets`.
 
 ## Scripts installed
 
@@ -130,9 +106,6 @@ Tools: `health_check`, `create_experiment`, `add_participant`, `claim_tick`,
 | `PA_SERVER_URL` | No | `https://api.aiprophet.dev` |
 | `PA_SERVER_API_KEY` | For any authenticated call | none |
 | `PA_REPORTING_API_URL` | No (dashboard only) | hosted reporting URL |
-| `KALSHI_API_KEY_ID` | For live Kalshi orders | none |
-| `KALSHI_PRIVATE_KEY_B64` | For live Kalshi orders | none |
-| `KALSHI_BASE_URL` | No | Kalshi default |
 
 ## Development
 
