@@ -41,6 +41,16 @@ cp .env.example .env
 
 ## How to Run
 
+For graders / a clean machine, use the bundled launcher — it builds
+`.venv`, installs dependencies, sources `.env`, validates the required
+keys, and starts the bot:
+
+```bash
+./run.sh
+```
+
+Equivalent manual invocation:
+
 ```bash
 python bot.py
 ```
@@ -64,10 +74,11 @@ To stop, send SIGINT. Restarting with the same `SLUG` and
 ```
 ai-prophet/
 ├── bot.py            # tick lifecycle + strategy
+├── run.sh            # reproducible launcher (venv + deps + .env + bot.py)
 ├── requirements.txt  # ai-prophet-core, groq, python-dotenv
 ├── .env.example      # API key template
 ├── README.md
-└── LICENSE
+└── LICENSE           # MIT
 ```
 
 `bot.py` is one self-contained file organised into four sections:
