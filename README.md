@@ -1,213 +1,340 @@
-# ai-prophet — Prophet Hacks 2026 Trading Track
+<div align="center">
 
-Our team's submission for **Prophet Hacks 2026 — Trading Track**. A
-custom paper-trading bot ([`bot.py`](bot.py)) that competes on Prophet
-Arena's 15-minute-tick prediction-market benchmark. We're scored on the
-combined rank of Sharpe ratio + PnL (lowest combined rank wins). The
-bot must have **positive PnL and at least 14 fills** over a two-week
-evaluation window.
+# Edge Hunter
+### Prophet Hacks 2026 — Trading Track submission
 
-## Overview
+[![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/license-MIT-22863a)](LICENSE)
+[![LLM: Groq Llama 3.3 70B](https://img.shields.io/badge/LLM-Groq%20Llama%203.3%2070B-F55036)](https://groq.com)
+[![Runtime: ai-prophet-core](https://img.shields.io/badge/runtime-ai--prophet--core-1F8FFF)](https://pypi.org/project/ai-prophet-core/)
+[![Slug](https://img.shields.io/badge/run%20slug-eval__sravya-555)](https://www.prophethacks.com/leaderboard/eval_sravya?rep=0)
 
-Prophet Arena pins a deterministic price snapshot every 15 minutes and
-runs fills against those pinned prices. The server owns all state; our
-bot is a thin HTTP client. Each tick we:
+**An ensemble-LLM trader for prediction markets, sized with fractional Kelly.**
 
-1. Claim the tick lease.
-2. Fetch the candidate market universe + quotes.
-3. Read our current portfolio.
-4. Decide which trades to submit (the interesting bit).
-5. Persist a reasoning JSON, submit intents, finalize, complete tick.
+*$10,000 starting bankroll · 15-minute ticks · 14-day evaluation · scored on Sharpe + PnL*
 
-Connection layer comes from [`ai-prophet-core`](https://pypi.org/project/ai-prophet-core/);
-the bot logic in this repo is fully our own.
+</div>
 
-## Setup
+---
 
-Requires Python 3.11+.
+## 🎯 The 30-second version
+
+| | |
+|---|---|
+| **Slug** | `eval_sravya` |
+| **Model** | `custom:ensemble-kelly` (our code) |
+| **Forecaster** | Groq `llama-3.3-70b-versatile` (free tier) |
+| **Sizing** | 0.25× fractional Kelly, capped at $1k / market and $10k gross |
+| **Filter** | Trade only when `|edge| > 0.10`; skip tail markets (`ask < 0.05` or `> 0.95`) |
+| **Calibration** | `p' = 0.85·p + 0.075` to dampen LLM overconfidence |
+| **Cost** | $0 (Groq free tier · no Kalshi key needed) |
+| **Live leaderboard** | https://www.prophethacks.com/leaderboard/eval_sravya?rep=0 |
+
+---
+
+## 📖 Overview
+
+Prophet Arena is a 15-minute-tick paper-trading benchmark for Kalshi
+prediction markets. Every tick is bound to a deterministic price
+snapshot — every participant sees the same markets and the same
+prices, and fills are deterministic against those pinned quotes.
+
+Each tick our bot:
+
+1. 🔒 **Claims** the tick lease.
+2. 📥 **Loads** the candidate market universe + quotes.
+3. 💰 **Reads** our current portfolio.
+4. 🧠 **Decides** which trades to submit *(this is the interesting part)*.
+5. 📤 **Submits** intents, persists a reasoning JSON, finalizes, advances.
+
+The connection layer comes from
+[`ai-prophet-core`](https://pypi.org/project/ai-prophet-core/);
+**every line of strategy logic in this repo is our own.**
+
+---
+
+## ⚡ Quick start
+
+> Requires Python 3.11+ and a Mac/Linux shell.
 
 ```bash
 git clone https://github.com/Sravya1802/ai-prophet.git
 cd ai-prophet
 
-python3 -m venv .venv
-source .venv/bin/activate
-pip install -r requirements.txt
-
 cp .env.example .env
 # fill in PA_SERVER_API_KEY (from the Prophet Arena operators on Discord)
 # and GROQ_API_KEY (free tier from console.groq.com)
-```
 
-## How to Run
-
-For graders / a clean machine, use the bundled launcher — it builds
-`.venv`, installs dependencies, sources `.env`, validates the required
-keys, and starts the bot:
-
-```bash
 ./run.sh
 ```
 
-Equivalent manual invocation:
+`run.sh` is a reproducible launcher — it creates a `.venv`, installs
+dependencies, sources `.env`, validates the required keys, and starts
+the bot. For graders, that's the only command you need.
+
+To run manually:
 
 ```bash
+python3 -m venv .venv && source .venv/bin/activate
+pip install -r requirements.txt
 python bot.py
 ```
 
-The bot is a long-lived process — it blocks on the next tick claim
-and wakes up every 15 minutes. Logs are one JSON record per line
-(grep-friendly):
+The bot is a long-lived process — it blocks on the next tick claim and
+wakes every 15 minutes. Logs are one JSON record per line, so they
+pair naturally with `jq`:
 
 ```bash
-python bot.py | tee bot.log
-# or live-watch decisions:
-python bot.py | jq -c 'select(.event == "decision")'
+# Watch decisions as they happen
+tail -f bot.log | grep -oE '\{.*' | jq -c 'select(.event == "decision")'
+
+# Per-tick summary only
+tail -f bot.log | grep -oE '\{.*' | jq -c 'select(.event == "tick_summary")'
 ```
 
-To stop, send SIGINT. Restarting with the same `SLUG` and
-`CONFIG_HASH` resumes the existing experiment server-side — the slug
-`eval_sravya` is reserved for this entry.
+Stop with `SIGINT`. Restarting under the same `SLUG` + `CONFIG_HASH`
+resumes the same experiment server-side, with no lost ticks.
 
-## Architecture
+---
+
+## 🛠️ Runtime knobs (env vars)
+
+These can be changed without touching the code or `config_hash` — set
+them at launch and the bot picks them up.
+
+| env var | default | purpose |
+|---|---|---|
+| `EDGE_THRESHOLD` | `0.10` | minimum `|edge|` to open a new trade |
+| `MAX_LLM_CALLS_PER_TICK` | `20` | hard cap on LLM calls per tick |
+| `BOT_DRY_RUN` | `false` | when `true`, log every would-be trade but skip `submit_intents` |
+| `TICK_LIMIT` | `0` | stop after N ticks (testing) |
+| `LOG_LEVEL` | `INFO` | set to `DEBUG` to log full raw LLM responses |
+
+Example: a looser-threshold, higher-budget run for testing:
+
+```bash
+EDGE_THRESHOLD=0.07 MAX_LLM_CALLS_PER_TICK=40 ./run.sh
+```
+
+---
+
+## 🏗️ Architecture
 
 ```
 ai-prophet/
 ├── bot.py            # tick lifecycle + strategy
-├── run.sh            # reproducible launcher (venv + deps + .env + bot.py)
+├── run.sh            # reproducible launcher
 ├── requirements.txt  # ai-prophet-core, groq, python-dotenv
 ├── .env.example      # API key template
 ├── README.md
 └── LICENSE           # MIT
 ```
 
-`bot.py` is one self-contained file organised into four sections:
+`bot.py` is one self-contained file organised into four layers:
 
-1. **Forecaster** — wraps Groq's OpenAI-compatible chat completions
-   API (`llama-3.3-70b-versatile`, free tier). The primary call returns
-   a JSON `{p_yes, rationale}`; a contrarian second call fires only on
-   high-divergence markets. Token usage is summed per tick. Pre-flight
-   budget checks make the per-tick LLM cap a hard limit.
-2. **Pricing helpers** — converts a `MarketQuote` into BUY/SELL fill
-   prices for each side, honouring Prophet Arena's execution
-   semantics (`BUY YES @ best_ask`, `BUY NO @ 1 - best_bid`, etc).
-3. **Portfolio view** — folds `PortfolioResponse` into a mutable
-   working state (`cash`, `gross_notional`, `per_market_notional`,
-   `open_count`, `positions_by_market`). The view is updated after
-   every decision so subsequent decisions in the same tick respect
-   what we've already committed.
-4. **Decisioning** — for each market: re-evaluate held positions
-   first (exit/flip if edge dies), then scan new candidates ranked by
-   |mid − 0.5| so cheaper, higher-asymmetry markets go first.
+### 1. Forecaster
+Wraps Groq's OpenAI-compatible chat completions API
+(`llama-3.3-70b-versatile`). Each LLM call returns a strict JSON
+`{p_yes, rationale}` via `response_format={"type": "json_object"}`. A
+primary call plus a *contrarian audit* second call on high-divergence
+markets are combined via the **geometric mean of odds**. Pre-flight
+budget checks make `MAX_LLM_CALLS_PER_TICK` a hard limit.
 
-The tick loop: `claim_tick → load_candidates → get_portfolio →
-re-evaluate held markets → scan new candidates → put_plan →
-submit_intents → finalize → complete_tick`. The outer loop catches all
-exceptions, logs a structured `tick_error`, and continues — so a
-transient SDK or LLM failure cannot crash the bot mid-experiment.
+### 2. Pricing helpers
+Translates a `MarketQuote` into BUY/SELL fill prices honouring Prophet
+Arena's execution semantics:
+- `BUY YES` fills at `best_ask`
+- `BUY NO` fills at `1 - best_bid`
+- `SELL YES` fills at `best_bid`
+- `SELL NO` fills at `1 - best_ask`
 
-### Strategy parameters
+### 3. Portfolio view
+Folds the live `PortfolioResponse` into a mutable working state
+(`cash`, `gross_notional`, `per_market_notional`, `open_count`,
+`positions_by_market`). **The view is updated after every decision**
+so subsequent decisions within the same tick respect the cumulative
+state, not the snapshot at tick-start.
+
+### 4. Decisioning
+For each market: re-evaluate held positions first (exit / flip if
+edge dies), then scan new candidates ranked by `|mid − 0.5|`
+descending so the highest-asymmetry markets are analysed before the
+per-tick LLM-call budget bites.
+
+### Tick loop
+
+```
+claim_tick → load_candidates → get_portfolio
+  → re-evaluate held markets → scan new candidates
+  → put_plan → submit_intents → finalize → complete_tick
+```
+
+The outer loop catches all exceptions, logs a structured `tick_error`,
+and continues — so a transient SDK or LLM failure cannot crash the
+bot mid-experiment.
+
+---
+
+## 🧪 Six differentiators
+
+### 1️⃣ Ensemble forecasting (primary + contrarian audit)
+
+Every candidate market gets a calibrated forecast from Llama 3.3 70B.
+If the primary estimate diverges from the market mid by **more than
+0.10**, a second contrarian call fires that explicitly challenges the
+first answer. Combined via the **geometric mean of YES odds**:
+
+```
+final_p = √(p₁·p₂) / ( √(p₁·p₂) + √((1−p₁)·(1−p₂)) )
+```
+
+The geometric mean of odds preserves the prior when the two agree
+and cancels overconfidence when they don't — better than the
+arithmetic mean, which is biased near extremes.
+
+### 2️⃣ Kelly criterion sizing
+
+Once a side is chosen, edge is taken in that side's price space
+(`p_eff − fill_price`). Kelly fraction is:
+
+```
+kelly_fraction = edge / (fill_price · (1 − fill_price))
+dollar_amount  = kelly_fraction · cash · 0.25
+shares         = ⌊ dollar_amount / fill_price ⌋
+```
+
+Then clipped by:
+- Per-market notional cap of **$1,000** (Prophet Arena rule)
+- Gross exposure cap of **$10,000** (Prophet Arena rule)
+- Remaining cash
+- Minimum 1 share
+
+### 3️⃣ Selective market filter
+
+Three filters slash both bad trades and LLM cost:
+
+| Stage | Filter | Why |
+|---|---|---|
+| Pre-LLM | skip `best_ask ∈ [0.40, 0.60]` | low edge potential, high cost per dollar of expected return |
+| Pre-LLM | skip `best_ask < 0.05` or `> 0.95` | tail markets where linear calibration creates phantom edge |
+| Post-LLM | only trade `|calibrated − mid| > 0.10` | fewer, higher-conviction trades = better Sharpe |
+
+### 4️⃣ Active position management
+
+Every tick we re-forecast every market we hold.
+
+- **Edge flipped sign?** → SELL the held side, then BUY the new side
+  in the same tick (two separate intents — Prophet Arena does *not*
+  auto-flip).
+- **Edge shrunk below 0.05?** → SELL the held side to exit.
+- Otherwise → hold (and possibly increase exposure if there's
+  per-market headroom under the $1,000 cap).
+
+### 5️⃣ Probability calibration
+
+LLMs are systematically overconfident at the extremes. We apply
+
+```
+calibrated = 0.85 · raw_prob + 0.075
+```
+
+which compresses `[0, 1]` → `[0.075, 0.925]`. This bites hardest
+exactly where naive sizing would be most dangerous — when the model
+says "0.95" and the market says "0.55".
+
+### 6️⃣ Cost-aware LLM usage
+
+- **Provider**: Groq free tier (`llama-3.3-70b-versatile`).
+- **Endpoint**: OpenAI-compatible `chat.completions`
+  (`response_format={"type": "json_object"}`, `temperature=0.3`,
+  `max_tokens=200`).
+- System prompts are **under 200 tokens**; user payloads are capped at
+  question + 600-char description + bid/ask/mid.
+- `MAX_LLM_CALLS_PER_TICK` is a **hard limit** — held-position
+  re-forecasting runs first, the candidate scan stops once budget
+  is exhausted.
+- `scan_summary` event logs `llm_calls`, `llm_input_tokens`,
+  `llm_output_tokens` per tick.
+- **Total LLM spend over the 14-day window: $0.**
+
+---
+
+## 📊 Structured logging
+
+Every event is one JSON record per line. Useful filters:
+
+```bash
+# decisions only
+jq -c 'select(.event == "decision")'
+
+# raw forecasts (pre-filter)
+jq -c 'select(.event == "llm_result")'
+
+# per-tick summary
+jq -c 'select(.event == "tick_summary")'
+
+# what got filtered and why
+jq -c 'select(.event == "scan_summary")'
+
+# fills + rejections
+jq -c 'select(.event | IN("fill","reject","tick_error"))'
+```
+
+---
+
+## 📐 Strategy parameters
 
 | param | value | meaning |
 |---|---|---|
-| `SLUG` | `eval_sravya` | experiment slug (one bot per slug) |
-| `N_TICKS` | 1500 | 14-day eval window (1,344 ticks) + buffer |
-| `STARTING_CASH` | $10,000 | mandatory |
-| `EDGE_OPEN_THRESHOLD` | 0.10 | open a new trade only if \|edge\| > 0.10 |
-| `EDGE_EXIT_THRESHOLD` | 0.05 | exit held side if effective edge drops below this |
-| `ENSEMBLE_DIVERGENCE` | 0.10 | trigger contrarian call when \|raw − mid\| > 0.10 |
-| `SKIP_MID_LOW / HIGH` | 0.40 / 0.60 | skip LLM for markets in this mid band |
-| `KELLY_FRACTION` | 0.25 | 0.25× fractional Kelly |
-| `CALIBRATION_SLOPE / INTERCEPT` | 0.85 / 0.075 | shrink raw LLM probs to [0.075, 0.925] |
-| `MAX_NEW_INTENTS_PER_TICK` | 12 | leaves headroom for SELL / flip intents under server's 20-fill cap |
+| `SLUG` | `eval_sravya` | one bot per slug |
+| `N_TICKS` | `1500` | 14-day eval window (1,344 ticks) + buffer |
+| `STARTING_CASH` | `$10,000` | required |
+| `EDGE_OPEN_THRESHOLD` | `0.10` | open new trade if `|edge| > 0.10` |
+| `EDGE_EXIT_THRESHOLD` | `0.05` | exit held side if edge drops below |
+| `ENSEMBLE_DIVERGENCE` | `0.10` | trigger contrarian call |
+| `SKIP_MID_LOW` / `SKIP_MID_HIGH` | `0.40` / `0.60` | mid-band LLM skip |
+| `SKIP_TAIL_LOW` / `SKIP_TAIL_HIGH` | `0.05` / `0.95` | tail-band LLM skip |
+| `KELLY_FRACTION` | `0.25` | 0.25× fractional Kelly |
+| `CALIBRATION_SLOPE` / `INTERCEPT` | `0.85` / `0.075` | LLM overconfidence dampener |
+| `MAX_NEW_INTENTS_PER_TICK` | `12` | headroom under server's 20-fill cap |
 
-## Six differentiators
+---
 
-### 1. Ensemble forecasting
+## 🧠 What we learned from live data
 
-For every candidate market we call Groq's `llama-3.3-70b-versatile`
-with a short calibrated-forecaster system prompt and parse a JSON
-`{p_yes, rationale}` (Groq's `response_format={"type": "json_object"}`
-guarantees valid JSON). If the primary estimate diverges from the
-market mid by more than 0.10, we run a second contrarian call that
-explicitly challenges the first answer. We combine the two with the
-**geometric mean of odds**:
+The first three live ticks revealed that our linear calibration was
+creating a **phantom ~0.075 "edge"** on tail markets — e.g.
+*"Will Australia win the 2026 World Cup?"* where both the LLM and the
+market correctly priced near-zero probability. The calibration
+intercept of `+0.075` was lifting our model's probability above the
+true tail price, generating fake disagreement.
 
-```
-final_prob = sqrt(p1 * p2) / ( sqrt(p1 * p2) + sqrt((1 - p1) * (1 - p2)) )
-```
+We added a `SKIP_TAIL_LOW / HIGH` filter (`best_ask < 0.05` or
+`> 0.95`) as a hash-stable patch — added as new constants outside
+`CONFIG_JSON` so `config_hash` stays at `fb8004ced6b97b1c` and the
+running experiment resumed cleanly across the restart.
 
-For single-call markets we use the primary estimate directly.
+This is the kind of bug you only catch with structured logging on a
+live system. Worth the 20 minutes it took to set up.
 
-### 2. Kelly criterion sizing
+---
 
-Once a side is chosen, edge is taken in that side's price space:
-`p_eff − fill_price`. Kelly fraction is
+## 📜 License
 
-```
-kelly_fraction = edge / (fill_price * (1 - fill_price))
-dollar_amount  = kelly_fraction * cash * 0.25
-shares         = int(dollar_amount / fill_price)
-```
+[MIT](LICENSE) — see file for full text.
 
-We then clip dollar amount by the per-market cap ($1,000), the gross
-exposure cap ($10,000), and remaining cash. Minimum of 1 share per
-trade; shares submitted as integer strings.
+---
 
-### 3. Selective market filter
+## 👤 Team
 
-Two filters slash both bad trades and LLM cost:
+| | |
+|---|---|
+| **Sravya1802** | `sravyarl1802@gmail.com` |
 
-- **Pre-LLM**: skip any market whose `best_ask` sits in [0.40, 0.60]
-  (low edge potential, high LLM cost per dollar of expected return).
-- **Post-LLM**: only trade markets where `|calibrated_prob − mid| > 0.10`.
+<div align="center">
 
-Fewer, higher-conviction trades = better Sharpe.
+---
 
-### 4. Active position management
+*Built for [Prophet Hacks 2026](https://prophethacks.com/) · Trading Track*
 
-Every tick we re-forecast every market we hold. For each held
-`(market_id, side)`:
-
-- If the edge has **flipped direction** (model now says the other
-  side is right), we **SELL the held side** to flat, then **BUY the
-  new side** in the same tick (two separate intents — required by
-  Prophet Arena's "no automatic flip" rule).
-- If the edge has **shrunk below 0.05**, we SELL the held side and
-  exit.
-- Otherwise we hold (and may increase exposure if there's per-market
-  headroom under the $1,000 cap).
-
-### 5. Calibration
-
-LLMs are overconfident. Before computing edge we apply
-
-```
-calibrated = 0.85 * raw_prob + 0.075
-```
-
-which compresses `[0, 1]` to `[0.075, 0.925]`. This bites hardest on
-exactly the cases where naïve sizing would otherwise be most
-dangerous (model says 0.95, market says 0.55).
-
-### 6. Cost-aware LLM usage
-
-- Provider: **Groq** free tier with `llama-3.3-70b-versatile`. We use
-  the OpenAI-compatible chat-completions endpoint with
-  `response_format={"type": "json_object"}`, `temperature=0.3`,
-  `max_tokens=200`.
-- System prompts are <200 tokens; user payloads are capped (question
-  + 600-char description + bid/ask/mid).
-- Markets in the 0.40-0.60 `best_ask` band are skipped before any
-  LLM call.
-- A per-tick LLM-call cap (`MAX_LLM_CALLS_PER_TICK`, default 20) is
-  enforced as a **hard limit**: held-position re-forecasting is run
-  first, then the candidate scan stops as soon as the budget is hit.
-- We log `llm_calls`, `llm_input_tokens`, and `llm_output_tokens` per
-  tick under the `scan_summary` event, and a `tick_summary` event
-  reports `markets_scanned`, `llm_calls_made`, `trades_submitted`,
-  `current_cash`, `current_equity`, and `total_positions`.
-
-## Team
-
-- **Sravya1802** — `sravyarl1802@gmail.com`
+</div>
