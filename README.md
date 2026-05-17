@@ -57,7 +57,7 @@ python bot.py | jq -c 'select(.event == "decision")'
 
 To stop, send SIGINT. Restarting with the same `SLUG` and
 `CONFIG_HASH` resumes the existing experiment server-side — the slug
-`sravya-ensemble-kelly-v2` is reserved for this entry.
+`eval_sravya` is reserved for this entry.
 
 ## Architecture
 
@@ -99,8 +99,8 @@ transient SDK or LLM failure cannot crash the bot mid-experiment.
 
 | param | value | meaning |
 |---|---|---|
-| `SLUG` | `sravya-ensemble-kelly-v2` | experiment slug (one bot per slug) |
-| `N_TICKS` | 1344 | 14 days × 96 ticks/day |
+| `SLUG` | `eval_sravya` | experiment slug (one bot per slug) |
+| `N_TICKS` | 1500 | 14-day eval window (1,344 ticks) + buffer |
 | `STARTING_CASH` | $10,000 | mandatory |
 | `EDGE_OPEN_THRESHOLD` | 0.10 | open a new trade only if \|edge\| > 0.10 |
 | `EDGE_EXIT_THRESHOLD` | 0.05 | exit held side if effective edge drops below this |
