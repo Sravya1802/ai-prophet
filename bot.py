@@ -55,7 +55,8 @@ from ai_prophet_core.ruleset import (
 SLUG = "sravya-ensemble-kelly-v1"
 N_TICKS = 1344  # 14 days * 96 ticks/day
 STARTING_CASH = 10_000.0
-LLM_MODEL = "claude-sonnet-4-20250514"
+LLM_PROVIDER = "groq"
+LLM_MODEL = "llama-3.3-70b-versatile"
 
 # Runtime knobs (read from env at startup):
 #   BOT_DRY_RUN              — "true" / "1" to skip submit_intents (default off)
@@ -211,10 +212,11 @@ def _geometric_mean_of_odds(p1: float, p2: float) -> float:
 
 
 class Forecaster:
-    """Two-stage LLM forecaster with cost-aware shortcuts."""
+    """Two-stage LLM forecaster (Groq, OpenAI-compatible) with cost-aware
+    shortcuts and a strict per-tick call budget."""
 
-    def __init__(self, anthropic_client: Any) -> None:
-        self.client = anthropic_client
+    def __init__(self, groq_client: Any) -> None:
+        self.client = groq_client
 
     def _ask(self, system: str, question: str, description: str,
              bid: float, ask: float, mid: float,
@@ -228,28 +230,40 @@ class Forecaster:
             f"Description: {desc}\n"
             f"Market quote: best_bid={bid:.3f} best_ask={ask:.3f} "
             f"(mid={mid:.3f} = implied P(YES))\n"
-            "Respond with ONLY the JSON object specified."
+            "Respond with ONLY a JSON object matching the schema."
         )
-        resp = self.client.messages.create(
+        resp = self.client.chat.completions.create(
             model=LLM_MODEL,
+            messages=[
+                {"role": "system", "content": system},
+                {"role": "user", "content": user},
+            ],
             max_tokens=200,
-            system=system,
-            messages=[{"role": "user", "content": user}],
+            temperature=0.3,
+            response_format={"type": "json_object"},
         )
-        text = "".join(
-            block.text for block in resp.content
-            if getattr(block, "type", "") == "text"
-        )
+        content = resp.choices[0].message.content or ""
         try:
-            in_t = resp.usage.input_tokens if resp.usage else 0
-            out_t = resp.usage.output_tokens if resp.usage else 0
+            in_t = getattr(resp.usage, "prompt_tokens", 0) or 0
+            out_t = getattr(resp.usage, "completion_tokens", 0) or 0
         except AttributeError:
             in_t, out_t = 0, 0
         usage.add(in_t, out_t)
-        return _parse_json_prob(text)
+        return _parse_json_prob(content)
 
     def forecast(self, market: MarketData, bid: float, ask: float, mid: float,
-                 usage: TokenUsage) -> Forecast | None:
+                 usage: TokenUsage, max_calls: int) -> Forecast | None:
+        """Returns None if the per-tick LLM budget is exhausted before we
+        get any usable estimate. If the budget is exhausted between the
+        primary and contrarian calls, returns the primary-only forecast.
+        """
+        # Hard pre-call budget check.
+        if usage.calls >= max_calls:
+            jlog("llm_budget_exhausted_pre_primary",
+                 market_id=market.market_id,
+                 calls=usage.calls, max_calls=max_calls)
+            return None
+
         try:
             p1, rationale1 = self._ask(
                 PRIMARY_SYSTEM_PROMPT, market.question, market.description or "",
@@ -261,6 +275,17 @@ class Forecaster:
 
         # Ensemble: contrarian audit only on high-divergence markets.
         if abs(p1 - mid) <= ENSEMBLE_DIVERGENCE:
+            calibrated = _calibrate(p1)
+            return Forecast(
+                raw_prob=p1, calibrated_prob=calibrated,
+                primary_prob=p1, contrarian_prob=None, rationale=rationale1,
+            )
+
+        # Pre-flight check before the contrarian call too.
+        if usage.calls >= max_calls:
+            jlog("llm_budget_exhausted_pre_contrarian",
+                 market_id=market.market_id,
+                 calls=usage.calls, max_calls=max_calls)
             calibrated = _calibrate(p1)
             return Forecast(
                 raw_prob=p1, calibrated_prob=calibrated,
@@ -631,7 +656,7 @@ def _run_one_tick(
             continue
         bid, ask, mid = prices
         markets_scanned += 1
-        fc = forecaster.forecast(m, bid, ask, mid, usage)
+        fc = forecaster.forecast(m, bid, ask, mid, usage, cfg.max_llm_calls)
         if fc is None:
             continue
         for d in _decide_for_market(m, fc, view, bid, ask, mid):
@@ -676,7 +701,7 @@ def _run_one_tick(
             skipped_llm_cap += 1
             break
         markets_scanned += 1
-        fc = forecaster.forecast(m, bid, ask, mid, usage)
+        fc = forecaster.forecast(m, bid, ask, mid, usage, cfg.max_llm_calls)
         if fc is None:
             continue
         signed_edge = fc.calibrated_prob - mid
@@ -846,7 +871,7 @@ def run() -> None:
 
     base_url = os.environ.get("PA_SERVER_URL", "https://api.aiprophet.dev")
     api_key = _require_env("PA_SERVER_API_KEY")
-    _require_env("ANTHROPIC_API_KEY")  # used implicitly by anthropic SDK
+    groq_api_key = _require_env("GROQ_API_KEY")
 
     cfg = RunConfig(
         dry_run=_env_bool("BOT_DRY_RUN", False),
@@ -855,13 +880,13 @@ def run() -> None:
         tick_limit=max(0, _env_int("TICK_LIMIT", DEFAULT_TICK_LIMIT)),
     )
 
-    import anthropic
-    anthropic_client = anthropic.Anthropic()
-    forecaster = Forecaster(anthropic_client)
+    from groq import Groq
+    groq_client = Groq(api_key=groq_api_key)
+    forecaster = Forecaster(groq_client)
 
     api = ServerAPIClient(base_url=base_url, api_key=api_key, timeout=30)
     jlog("bot_start", slug=SLUG, n_ticks=N_TICKS, base_url=base_url,
-         config_hash=CONFIG_HASH, model=LLM_MODEL,
+         config_hash=CONFIG_HASH, provider=LLM_PROVIDER, model=LLM_MODEL,
          dry_run=cfg.dry_run, max_llm_calls_per_tick=cfg.max_llm_calls,
          tick_limit=cfg.tick_limit)
 

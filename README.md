@@ -36,7 +36,7 @@ pip install -r requirements.txt
 
 cp .env.example .env
 # fill in PA_SERVER_API_KEY (from the Prophet Arena operators on Discord)
-# and ANTHROPIC_API_KEY (from console.anthropic.com)
+# and GROQ_API_KEY (free tier from console.groq.com)
 ```
 
 ## How to Run
@@ -64,7 +64,7 @@ To stop, send SIGINT. Restarting with the same `SLUG` and
 ```
 ai-prophet/
 ├── bot.py            # tick lifecycle + strategy
-├── requirements.txt  # ai-prophet-core, anthropic, python-dotenv
+├── requirements.txt  # ai-prophet-core, groq, python-dotenv
 ├── .env.example      # API key template
 ├── README.md
 └── LICENSE
@@ -72,9 +72,11 @@ ai-prophet/
 
 `bot.py` is one self-contained file organised into four sections:
 
-1. **Forecaster** — wraps Anthropic's Messages API. The primary call
-   returns a JSON `{p_yes, rationale}`; a contrarian second call fires
-   only on high-divergence markets. Token usage is summed per tick.
+1. **Forecaster** — wraps Groq's OpenAI-compatible chat completions
+   API (`llama-3.3-70b-versatile`, free tier). The primary call returns
+   a JSON `{p_yes, rationale}`; a contrarian second call fires only on
+   high-divergence markets. Token usage is summed per tick. Pre-flight
+   budget checks make the per-tick LLM cap a hard limit.
 2. **Pricing helpers** — converts a `MarketQuote` into BUY/SELL fill
    prices for each side, honouring Prophet Arena's execution
    semantics (`BUY YES @ best_ask`, `BUY NO @ 1 - best_bid`, etc).
@@ -112,9 +114,10 @@ transient SDK or LLM failure cannot crash the bot mid-experiment.
 
 ### 1. Ensemble forecasting
 
-For every candidate market we call `claude-sonnet-4-20250514` with a
-short calibrated-forecaster system prompt and parse a JSON
-`{p_yes, rationale}`. If the primary estimate diverges from the
+For every candidate market we call Groq's `llama-3.3-70b-versatile`
+with a short calibrated-forecaster system prompt and parse a JSON
+`{p_yes, rationale}` (Groq's `response_format={"type": "json_object"}`
+guarantees valid JSON). If the primary estimate diverges from the
 market mid by more than 0.10, we run a second contrarian call that
 explicitly challenges the first answer. We combine the two with the
 **geometric mean of odds**:
@@ -178,14 +181,21 @@ dangerous (model says 0.95, market says 0.55).
 
 ### 6. Cost-aware LLM usage
 
-- System prompts are <200 tokens; user payloads are capped (questions
-  + 600-char description + mid price). `max_tokens=200` on responses.
+- Provider: **Groq** free tier with `llama-3.3-70b-versatile`. We use
+  the OpenAI-compatible chat-completions endpoint with
+  `response_format={"type": "json_object"}`, `temperature=0.3`,
+  `max_tokens=200`.
+- System prompts are <200 tokens; user payloads are capped (question
+  + 600-char description + bid/ask/mid).
 - Markets in the 0.40-0.60 `best_ask` band are skipped before any
   LLM call.
-- We log `llm_calls`, `llm_input_tokens`, and `llm_output_tokens`
-  per tick under the `scan_summary` event.
-- Responses are forced to a strict JSON-only contract via the system
-  prompt to keep output tokens tiny.
+- A per-tick LLM-call cap (`MAX_LLM_CALLS_PER_TICK`, default 20) is
+  enforced as a **hard limit**: held-position re-forecasting is run
+  first, then the candidate scan stops as soon as the budget is hit.
+- We log `llm_calls`, `llm_input_tokens`, and `llm_output_tokens` per
+  tick under the `scan_summary` event, and a `tick_summary` event
+  reports `markets_scanned`, `llm_calls_made`, `trades_submitted`,
+  `current_cash`, `current_equity`, and `total_positions`.
 
 ## Team
 
