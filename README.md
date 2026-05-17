@@ -8,7 +8,7 @@
 [![LLM: Groq Llama 3.3 70B](https://img.shields.io/badge/voice%201-Groq%20Llama%203.3%2070B-F55036)](https://groq.com)
 [![LLM: xAI Grok 4](https://img.shields.io/badge/voice%202-xAI%20Grok%204-000000)](https://x.ai)
 [![Runtime: ai-prophet-core](https://img.shields.io/badge/runtime-ai--prophet--core-1F8FFF)](https://pypi.org/project/ai-prophet-core/)
-[![Slug](https://img.shields.io/badge/run%20slug-eval__gradientprophets-555)](https://www.prophethacks.com/leaderboard/eval_gradientprophets?rep=0)
+[![Slug](https://img.shields.io/badge/run%20slug-eval__gradient__prophets-555)](https://www.prophethacks.com/leaderboard/eval_gradient_prophets?rep=0)
 
 **An ensemble-LLM trader for prediction markets, sized with fractional Kelly.**
 
@@ -22,14 +22,14 @@
 
 | | |
 |---|---|
-| **Slug** | `eval_gradientprophets` |
+| **Slug** | `eval_gradient_prophets` |
 | **Model** | `custom:ensemble-kelly` (our code) |
 | **Forecasters** | Groq `llama-3.3-70b-versatile` ⊕ xAI `grok-4-fast-reasoning` |
 | **Sizing** | 0.25× fractional Kelly, capped at $1k / market and $10k gross |
 | **Filter** | Trade only when `|edge| > 0.10`; skip tail markets (`ask < 0.05` or `> 0.95`) |
 | **Calibration** | Anchor to market mid: `p' = 0.7·p + 0.3·mid` |
 | **Cost** | Groq free tier + ~$3-10 of xAI credits over 14 days |
-| **Live leaderboard** | https://www.prophethacks.com/leaderboard/eval_gradientprophets?rep=0 |
+| **Live leaderboard** | https://www.prophethacks.com/leaderboard/eval_gradient_prophets?rep=0 |
 
 ---
 
@@ -321,7 +321,7 @@ jq -c 'select(.event | IN("fill","reject","tick_error"))'
 
 | param | value | meaning |
 |---|---|---|
-| `SLUG` | `eval_gradientprophets` | one bot per slug |
+| `SLUG` | `eval_gradient_prophets` | one bot per slug |
 | `N_TICKS` | `1500` | 14-day eval window (1,344 ticks) + buffer |
 | `STARTING_CASH` | `$10,000` | required |
 | `EDGE_OPEN_THRESHOLD` | `0.10` | open new trade if `|edge| > 0.10` |
@@ -350,7 +350,7 @@ awards-show winners and immediately drew down to −22%.
 The lesson: shrinking toward `0.5` is the wrong prior for prediction
 markets, because the market's own mid-price is a much stronger one.
 
-In v2 (this submission, slug `eval_gradientprophets`) we replaced the
+In v2 (this submission, slug `eval_gradient_prophets`) we replaced the
 formula with **`calibrated = 0.7·raw + 0.3·mid`**. When the LLM
 agrees with the market, calibrated ≈ mid → no phantom edge → no
 trade. When the LLM has an independent view, the calibrated value

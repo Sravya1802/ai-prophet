@@ -52,7 +52,7 @@ from ai_prophet_core.ruleset import (
 
 # --- Strategy constants -------------------------------------------------------
 
-SLUG = "eval_gradientprophets"
+SLUG = "eval_gradient_prophets"
 N_TICKS = 1500  # 14-day eval window (1,344 ticks) + small buffer
 STARTING_CASH = 10_000.0
 
