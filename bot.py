@@ -58,10 +58,12 @@ STARTING_CASH = 10_000.0
 LLM_PROVIDER = "groq"
 LLM_MODEL = "llama-3.3-70b-versatile"
 
-# Runtime knobs (read from env at startup):
+# Runtime knobs (read from env at startup; not hashed into config_hash):
 #   BOT_DRY_RUN              — "true" / "1" to skip submit_intents (default off)
 #   MAX_LLM_CALLS_PER_TICK   — cap LLM calls per tick (default 20)
 #   TICK_LIMIT               — stop after N ticks (default 0 == unlimited)
+#   EDGE_THRESHOLD           — min |edge| to open a new trade (default 0.10)
+#   LOG_LEVEL                — "DEBUG" prints raw LLM responses
 DEFAULT_MAX_LLM_CALLS_PER_TICK = 20
 DEFAULT_TICK_LIMIT = 0
 
@@ -92,6 +94,10 @@ CONFIG_JSON: dict[str, Any] = {
         "ensemble_divergence": ENSEMBLE_DIVERGENCE,
         "combine": "geometric-mean-of-odds",
     },
+    # Design defaults. EDGE_THRESHOLD can be overridden at runtime via
+    # the env var of the same name; that override is logged in bot_start
+    # and persisted per-tick in the plan JSON, but is intentionally NOT
+    # part of CONFIG_HASH so live tuning doesn't fork the experiment.
     "filter": {
         "edge_open_threshold": EDGE_OPEN_THRESHOLD,
         "edge_exit_threshold": EDGE_EXIT_THRESHOLD,
@@ -123,7 +129,7 @@ CONFIG_HASH = hashlib.sha256(
 logger = logging.getLogger("bot")
 
 
-def _setup_logging() -> None:
+def _setup_logging(level: str = "INFO") -> None:
     handler = logging.StreamHandler(sys.stdout)
     handler.setFormatter(
         logging.Formatter(
@@ -134,12 +140,19 @@ def _setup_logging() -> None:
     root = logging.getLogger()
     root.handlers.clear()
     root.addHandler(handler)
-    root.setLevel(logging.INFO)
+    root.setLevel(getattr(logging, level.upper(), logging.INFO))
 
 
 def jlog(event: str, **fields: Any) -> None:
     """One JSON record per log line — easy to grep / pipe to jq."""
     logger.info(json.dumps({"event": event, **fields}, default=str, sort_keys=True))
+
+
+def dlog(event: str, **fields: Any) -> None:
+    """Debug-level structured log; emitted only when LOG_LEVEL=DEBUG."""
+    if logger.isEnabledFor(logging.DEBUG):
+        logger.debug(json.dumps({"event": event, **fields},
+                                default=str, sort_keys=True))
 
 
 # --- Forecasting (Anthropic ensemble) ----------------------------------------
@@ -220,7 +233,8 @@ class Forecaster:
 
     def _ask(self, system: str, question: str, description: str,
              bid: float, ask: float, mid: float,
-             usage: TokenUsage) -> tuple[float, str]:
+             usage: TokenUsage,
+             market_id: str = "", call_kind: str = "primary") -> tuple[float, str]:
         # Keep the user message compact (cost-aware: short context).
         desc = (description or "").strip()
         if len(desc) > 600:
@@ -249,6 +263,8 @@ class Forecaster:
         except AttributeError:
             in_t, out_t = 0, 0
         usage.add(in_t, out_t)
+        dlog("llm_response_raw", market_id=market_id, call=call_kind,
+             content=content, prompt_tokens=in_t, completion_tokens=out_t)
         return _parse_json_prob(content)
 
     def forecast(self, market: MarketData, bid: float, ask: float, mid: float,
@@ -268,6 +284,7 @@ class Forecaster:
             p1, rationale1 = self._ask(
                 PRIMARY_SYSTEM_PROMPT, market.question, market.description or "",
                 bid, ask, mid, usage,
+                market_id=market.market_id, call_kind="primary",
             )
         except Exception as e:
             jlog("llm_primary_failed", market_id=market.market_id, error=str(e))
@@ -302,6 +319,7 @@ class Forecaster:
             p2, rationale2 = self._ask(
                 CONTRARIAN_SYSTEM_PROMPT, contrarian_user, market.description or "",
                 bid, ask, mid, usage,
+                market_id=market.market_id, call_kind="contrarian",
             )
         except Exception as e:
             jlog("llm_contrarian_failed", market_id=market.market_id, error=str(e))
@@ -436,6 +454,7 @@ def _decide_for_market(
     bid: float,
     ask: float,
     mid: float,
+    edge_threshold: float = EDGE_OPEN_THRESHOLD,
 ) -> list[Decision]:
     """Produce zero or more intents for a single market.
 
@@ -449,9 +468,9 @@ def _decide_for_market(
     out: list[Decision] = []
 
     # Determine which side our model wants now.
-    if signed_edge_yes >= EDGE_OPEN_THRESHOLD:
+    if signed_edge_yes >= edge_threshold:
         want_side = "YES"
-    elif signed_edge_yes <= -EDGE_OPEN_THRESHOLD:
+    elif signed_edge_yes <= -edge_threshold:
         want_side = "NO"
     else:
         want_side = None
@@ -571,6 +590,8 @@ class RunConfig:
     dry_run: bool
     max_llm_calls: int
     tick_limit: int
+    edge_threshold: float
+    log_level: str
 
 
 def _log_decision(m: MarketData, d: Decision, fc: Forecast) -> None:
@@ -659,7 +680,23 @@ def _run_one_tick(
         fc = forecaster.forecast(m, bid, ask, mid, usage, cfg.max_llm_calls)
         if fc is None:
             continue
-        for d in _decide_for_market(m, fc, view, bid, ask, mid):
+        edge = fc.calibrated_prob - mid
+        jlog(
+            "llm_result",
+            market_id=m.market_id,
+            question=m.question[:200],
+            raw_prob=round(fc.raw_prob, 4),
+            calibrated_prob=round(fc.calibrated_prob, 4),
+            market_mid=round(mid, 4),
+            edge=round(edge, 4),
+            edge_abs=round(abs(edge), 4),
+            pass_="held",
+            primary_prob=round(fc.primary_prob, 4),
+            contrarian_prob=(round(fc.contrarian_prob, 4)
+                             if fc.contrarian_prob is not None else None),
+        )
+        for d in _decide_for_market(m, fc, view, bid, ask, mid,
+                                    edge_threshold=cfg.edge_threshold):
             decisions.append(d)
             _apply_decision_to_view(view, d)
             _log_decision(m, d, fc)
@@ -705,10 +742,25 @@ def _run_one_tick(
         if fc is None:
             continue
         signed_edge = fc.calibrated_prob - mid
-        if abs(signed_edge) < EDGE_OPEN_THRESHOLD:
+        jlog(
+            "llm_result",
+            market_id=m.market_id,
+            question=m.question[:200],
+            raw_prob=round(fc.raw_prob, 4),
+            calibrated_prob=round(fc.calibrated_prob, 4),
+            market_mid=round(mid, 4),
+            edge=round(signed_edge, 4),
+            edge_abs=round(abs(signed_edge), 4),
+            pass_="scan",
+            primary_prob=round(fc.primary_prob, 4),
+            contrarian_prob=(round(fc.contrarian_prob, 4)
+                             if fc.contrarian_prob is not None else None),
+        )
+        if abs(signed_edge) < cfg.edge_threshold:
             skipped_low_edge += 1
             continue
-        for d in _decide_for_market(m, fc, view, bid, ask, mid):
+        for d in _decide_for_market(m, fc, view, bid, ask, mid,
+                                    edge_threshold=cfg.edge_threshold):
             decisions.append(d)
             _apply_decision_to_view(view, d)
             if d.flow in ("open", "flip-buy"):
@@ -734,6 +786,7 @@ def _run_one_tick(
         "strategy": "ensemble-kelly",
         "config_hash": CONFIG_HASH,
         "tick_id": lease.tick_id,
+        "active_edge_threshold": cfg.edge_threshold,
         "portfolio_snapshot": {
             "cash": round(view.cash, 2),
             "gross_notional": round(view.gross_notional, 2),
@@ -865,9 +918,21 @@ def _env_int(name: str, default: int) -> int:
         return default
 
 
+def _env_float(name: str, default: float) -> float:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return float(raw)
+    except ValueError:
+        return default
+
+
 def run() -> None:
     load_dotenv()
-    _setup_logging()
+
+    log_level = os.environ.get("LOG_LEVEL", "INFO").strip() or "INFO"
+    _setup_logging(level=log_level)
 
     base_url = os.environ.get("PA_SERVER_URL", "https://api.aiprophet.dev")
     api_key = _require_env("PA_SERVER_API_KEY")
@@ -878,6 +943,9 @@ def run() -> None:
         max_llm_calls=max(0, _env_int("MAX_LLM_CALLS_PER_TICK",
                                       DEFAULT_MAX_LLM_CALLS_PER_TICK)),
         tick_limit=max(0, _env_int("TICK_LIMIT", DEFAULT_TICK_LIMIT)),
+        edge_threshold=max(0.0, _env_float("EDGE_THRESHOLD",
+                                           EDGE_OPEN_THRESHOLD)),
+        log_level=log_level,
     )
 
     from groq import Groq
@@ -888,7 +956,10 @@ def run() -> None:
     jlog("bot_start", slug=SLUG, n_ticks=N_TICKS, base_url=base_url,
          config_hash=CONFIG_HASH, provider=LLM_PROVIDER, model=LLM_MODEL,
          dry_run=cfg.dry_run, max_llm_calls_per_tick=cfg.max_llm_calls,
-         tick_limit=cfg.tick_limit)
+         tick_limit=cfg.tick_limit,
+         edge_threshold=cfg.edge_threshold,
+         edge_threshold_default=EDGE_OPEN_THRESHOLD,
+         log_level=cfg.log_level)
 
     with BenchmarkSession(api) as session:
         exp = session.create_experiment(
