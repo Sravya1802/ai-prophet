@@ -7,7 +7,7 @@
 [![License: MIT](https://img.shields.io/badge/license-MIT-22863a)](LICENSE)
 [![LLM: Groq Llama 3.3 70B](https://img.shields.io/badge/LLM-Groq%20Llama%203.3%2070B-F55036)](https://groq.com)
 [![Runtime: ai-prophet-core](https://img.shields.io/badge/runtime-ai--prophet--core-1F8FFF)](https://pypi.org/project/ai-prophet-core/)
-[![Slug](https://img.shields.io/badge/run%20slug-eval__sravya-555)](https://www.prophethacks.com/leaderboard/eval_sravya?rep=0)
+[![Slug](https://img.shields.io/badge/run%20slug-eval__gradientprophets-555)](https://www.prophethacks.com/leaderboard/eval_gradientprophets?rep=0)
 
 **An ensemble-LLM trader for prediction markets, sized with fractional Kelly.**
 
@@ -21,14 +21,14 @@
 
 | | |
 |---|---|
-| **Slug** | `eval_sravya` |
+| **Slug** | `eval_gradientprophets` |
 | **Model** | `custom:ensemble-kelly` (our code) |
 | **Forecaster** | Groq `llama-3.3-70b-versatile` (free tier) |
 | **Sizing** | 0.25× fractional Kelly, capped at $1k / market and $10k gross |
 | **Filter** | Trade only when `|edge| > 0.10`; skip tail markets (`ask < 0.05` or `> 0.95`) |
-| **Calibration** | `p' = 0.85·p + 0.075` to dampen LLM overconfidence |
+| **Calibration** | Anchor to market mid: `p' = 0.7·p + 0.3·mid` |
 | **Cost** | $0 (Groq free tier · no Kalshi key needed) |
-| **Live leaderboard** | https://www.prophethacks.com/leaderboard/eval_sravya?rep=0 |
+| **Live leaderboard** | https://www.prophethacks.com/leaderboard/eval_gradientprophets?rep=0 |
 
 ---
 
@@ -230,17 +230,21 @@ Every tick we re-forecast every market we hold.
 - Otherwise → hold (and possibly increase exposure if there's
   per-market headroom under the $1,000 cap).
 
-### 5️⃣ Probability calibration
+### 5️⃣ Probability calibration (anchor to market mid)
 
-LLMs are systematically overconfident at the extremes. We apply
+LLMs are systematically overconfident *and* a naive shrinkage toward
+0.5 introduces phantom edge against tail markets. We anchor toward
+the market's own mid-price:
 
 ```
-calibrated = 0.85 · raw_prob + 0.075
+calibrated = 0.7 · raw_prob + 0.3 · mid
 ```
 
-which compresses `[0, 1]` → `[0.075, 0.925]`. This bites hardest
-exactly where naive sizing would be most dangerous — when the model
-says "0.95" and the market says "0.55".
+When the LLM agrees with the market, `calibrated ≈ mid` and no edge
+is reported. When the LLM has an *independent* view, the calibrated
+value moves from the market toward the LLM, scaled by the
+LLM's weight. This eliminates the phantom-edge failure mode without
+muting genuine disagreement.
 
 ### 6️⃣ Cost-aware LLM usage
 
@@ -286,7 +290,7 @@ jq -c 'select(.event | IN("fill","reject","tick_error"))'
 
 | param | value | meaning |
 |---|---|---|
-| `SLUG` | `eval_sravya` | one bot per slug |
+| `SLUG` | `eval_gradientprophets` | one bot per slug |
 | `N_TICKS` | `1500` | 14-day eval window (1,344 ticks) + buffer |
 | `STARTING_CASH` | `$10,000` | required |
 | `EDGE_OPEN_THRESHOLD` | `0.10` | open new trade if `|edge| > 0.10` |
@@ -295,27 +299,35 @@ jq -c 'select(.event | IN("fill","reject","tick_error"))'
 | `SKIP_MID_LOW` / `SKIP_MID_HIGH` | `0.40` / `0.60` | mid-band LLM skip |
 | `SKIP_TAIL_LOW` / `SKIP_TAIL_HIGH` | `0.05` / `0.95` | tail-band LLM skip |
 | `KELLY_FRACTION` | `0.25` | 0.25× fractional Kelly |
-| `CALIBRATION_SLOPE` / `INTERCEPT` | `0.85` / `0.075` | LLM overconfidence dampener |
+| `CALIBRATION_WEIGHT_RAW` / `_MID` | `0.7` / `0.3` | anchor calibrated prob toward market mid |
 | `MAX_NEW_INTENTS_PER_TICK` | `12` | headroom under server's 20-fill cap |
 
 ---
 
 ## 🧠 What we learned from live data
 
-The first three live ticks revealed that our linear calibration was
-creating a **phantom ~0.075 "edge"** on tail markets — e.g.
-*"Will Australia win the 2026 World Cup?"* where both the LLM and the
-market correctly priced near-zero probability. The calibration
-intercept of `+0.075` was lifting our model's probability above the
-true tail price, generating fake disagreement.
+The first live run (`eval_sravya`) exposed a subtle bug in our v1
+calibration formula `0.85·raw + 0.075`. For tail markets — e.g.
+*"Will Adam Driver win Best Actor at the 2027 Oscars?"* — both the
+LLM (`raw_p ≈ 0.04`) and the market (`mid ≈ 0.035`) correctly
+priced near-zero probability. But the `+0.075` intercept mechanically
+lifted our calibrated probability to `0.109`, generating a fake
+0.074 "edge" against the true price. With a lowered threshold, the
+bot deployed $4,000 on ~75,000 lottery-ticket shares of 2026/2027
+awards-show winners and immediately drew down to −22%.
 
-We added a `SKIP_TAIL_LOW / HIGH` filter (`best_ask < 0.05` or
-`> 0.95`) as a hash-stable patch — added as new constants outside
-`CONFIG_JSON` so `config_hash` stays at `fb8004ced6b97b1c` and the
-running experiment resumed cleanly across the restart.
+The lesson: shrinking toward `0.5` is the wrong prior for prediction
+markets, because the market's own mid-price is a much stronger one.
 
-This is the kind of bug you only catch with structured logging on a
-live system. Worth the 20 minutes it took to set up.
+In v2 (this submission, slug `eval_gradientprophets`) we replaced the
+formula with **`calibrated = 0.7·raw + 0.3·mid`**. When the LLM
+agrees with the market, calibrated ≈ mid → no phantom edge → no
+trade. When the LLM has an independent view, the calibrated value
+moves toward the LLM's estimate proportional to the LLM weight, and
+genuine disagreement still triggers a trade.
+
+This is the kind of bug you only catch by deploying with structured
+logging and reading the data. Worth every minute of the setup.
 
 ---
 

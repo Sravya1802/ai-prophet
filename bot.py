@@ -52,7 +52,7 @@ from ai_prophet_core.ruleset import (
 
 # --- Strategy constants -------------------------------------------------------
 
-SLUG = "eval_sravya"
+SLUG = "eval_gradientprophets"
 N_TICKS = 1500  # 14-day eval window (1,344 ticks) + small buffer
 STARTING_CASH = 10_000.0
 LLM_PROVIDER = "groq"
@@ -81,9 +81,14 @@ SKIP_MID_HIGH = 0.60
 SKIP_TAIL_LOW = 0.05
 SKIP_TAIL_HIGH = 0.95
 
-# Probability calibration: shrinks [0,1] -> [0.075, 0.925]
-CALIBRATION_SLOPE = 0.85
-CALIBRATION_INTERCEPT = 0.075
+# Probability calibration: anchor toward market mid-price, NOT toward 0.5.
+# Old formula (0.85*raw + 0.075) introduced a ~0.075 phantom edge against
+# tail markets where both LLM and market correctly priced near zero. The
+# new formula gives weight to the market's prior so calibrated ≈ mid when
+# the LLM agrees with the market and deviates only when the LLM has a
+# real, independent view.
+CALIBRATION_WEIGHT_RAW = 0.7   # weight on the LLM's own probability
+CALIBRATION_WEIGHT_MID = 0.3   # weight on the market mid (the prior)
 
 # Position sizing
 KELLY_FRACTION = 0.25             # 0.25x fractional Kelly
@@ -111,8 +116,9 @@ CONFIG_JSON: dict[str, Any] = {
         "skip_mid_band": [SKIP_MID_LOW, SKIP_MID_HIGH],
     },
     "calibration": {
-        "slope": CALIBRATION_SLOPE,
-        "intercept": CALIBRATION_INTERCEPT,
+        "rule": "anchor-to-mid",
+        "weight_raw": CALIBRATION_WEIGHT_RAW,
+        "weight_mid": CALIBRATION_WEIGHT_MID,
     },
     "sizing": {
         "rule": "fractional-kelly",
@@ -216,9 +222,17 @@ def _parse_json_prob(text: str) -> tuple[float, str]:
     return p, str(obj.get("rationale", ""))[:160]
 
 
-def _calibrate(p: float) -> float:
-    """Shrink overconfident probabilities away from 0 and 1."""
-    return max(0.0, min(1.0, CALIBRATION_SLOPE * p + CALIBRATION_INTERCEPT))
+def _calibrate(p: float, mid: float) -> float:
+    """Anchor LLM probability toward the market mid.
+
+    calibrated = weight_raw * p + weight_mid * mid
+
+    When the LLM agrees with the market, calibrated ≈ mid → no phantom
+    edge. When the LLM disagrees, the calibrated value deviates from the
+    market in the LLM's direction, scaled by ``weight_raw``.
+    """
+    calibrated = CALIBRATION_WEIGHT_RAW * p + CALIBRATION_WEIGHT_MID * mid
+    return max(0.0, min(1.0, calibrated))
 
 
 def _geometric_mean_of_odds(p1: float, p2: float) -> float:
@@ -299,7 +313,7 @@ class Forecaster:
 
         # Ensemble: contrarian audit only on high-divergence markets.
         if abs(p1 - mid) <= ENSEMBLE_DIVERGENCE:
-            calibrated = _calibrate(p1)
+            calibrated = _calibrate(p1, mid)
             return Forecast(
                 raw_prob=p1, calibrated_prob=calibrated,
                 primary_prob=p1, contrarian_prob=None, rationale=rationale1,
@@ -310,7 +324,7 @@ class Forecaster:
             jlog("llm_budget_exhausted_pre_contrarian",
                  market_id=market.market_id,
                  calls=usage.calls, max_calls=max_calls)
-            calibrated = _calibrate(p1)
+            calibrated = _calibrate(p1, mid)
             return Forecast(
                 raw_prob=p1, calibrated_prob=calibrated,
                 primary_prob=p1, contrarian_prob=None, rationale=rationale1,
@@ -330,14 +344,14 @@ class Forecaster:
             )
         except Exception as e:
             jlog("llm_contrarian_failed", market_id=market.market_id, error=str(e))
-            calibrated = _calibrate(p1)
+            calibrated = _calibrate(p1, mid)
             return Forecast(
                 raw_prob=p1, calibrated_prob=calibrated,
                 primary_prob=p1, contrarian_prob=None, rationale=rationale1,
             )
 
         ensemble = _geometric_mean_of_odds(p1, p2)
-        calibrated = _calibrate(ensemble)
+        calibrated = _calibrate(ensemble, mid)
         return Forecast(
             raw_prob=ensemble, calibrated_prob=calibrated,
             primary_prob=p1, contrarian_prob=p2, rationale=rationale2 or rationale1,
