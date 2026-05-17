@@ -57,6 +57,13 @@ N_TICKS = 1344  # 14 days * 96 ticks/day
 STARTING_CASH = 10_000.0
 LLM_MODEL = "claude-sonnet-4-20250514"
 
+# Runtime knobs (read from env at startup):
+#   BOT_DRY_RUN              — "true" / "1" to skip submit_intents (default off)
+#   MAX_LLM_CALLS_PER_TICK   — cap LLM calls per tick (default 20)
+#   TICK_LIMIT               — stop after N ticks (default 0 == unlimited)
+DEFAULT_MAX_LLM_CALLS_PER_TICK = 20
+DEFAULT_TICK_LIMIT = 0
+
 # Filtering / edge thresholds
 EDGE_OPEN_THRESHOLD = 0.10        # |edge| required to open a new trade
 EDGE_EXIT_THRESHOLD = 0.05        # exit a held side when edge shrinks below this
@@ -209,7 +216,8 @@ class Forecaster:
     def __init__(self, anthropic_client: Any) -> None:
         self.client = anthropic_client
 
-    def _ask(self, system: str, question: str, description: str, mid: float,
+    def _ask(self, system: str, question: str, description: str,
+             bid: float, ask: float, mid: float,
              usage: TokenUsage) -> tuple[float, str]:
         # Keep the user message compact (cost-aware: short context).
         desc = (description or "").strip()
@@ -218,7 +226,8 @@ class Forecaster:
         user = (
             f"Question: {question}\n"
             f"Description: {desc}\n"
-            f"Market mid-price (implied P(YES)): {mid:.3f}\n"
+            f"Market quote: best_bid={bid:.3f} best_ask={ask:.3f} "
+            f"(mid={mid:.3f} = implied P(YES))\n"
             "Respond with ONLY the JSON object specified."
         )
         resp = self.client.messages.create(
@@ -239,12 +248,12 @@ class Forecaster:
         usage.add(in_t, out_t)
         return _parse_json_prob(text)
 
-    def forecast(self, market: MarketData, mid: float,
+    def forecast(self, market: MarketData, bid: float, ask: float, mid: float,
                  usage: TokenUsage) -> Forecast | None:
         try:
             p1, rationale1 = self._ask(
                 PRIMARY_SYSTEM_PROMPT, market.question, market.description or "",
-                mid, usage,
+                bid, ask, mid, usage,
             )
         except Exception as e:
             jlog("llm_primary_failed", market_id=market.market_id, error=str(e))
@@ -261,11 +270,13 @@ class Forecaster:
         try:
             contrarian_user = (
                 f"A prior forecaster said p_yes={p1:.3f} for: '{market.question}'.\n"
-                f"The market trades at mid={mid:.3f}. The gap is unusually wide."
+                f"The market trades at mid={mid:.3f} "
+                f"(best_bid={bid:.3f}, best_ask={ask:.3f}). "
+                "The gap is unusually wide."
             )
             p2, rationale2 = self._ask(
                 CONTRARIAN_SYSTEM_PROMPT, contrarian_user, market.description or "",
-                mid, usage,
+                bid, ask, mid, usage,
             )
         except Exception as e:
             jlog("llm_contrarian_failed", market_id=market.market_id, error=str(e))
@@ -530,17 +541,51 @@ def _apply_decision_to_view(view: PortfolioView, d: Decision) -> None:
 
 # --- Tick loop ---------------------------------------------------------------
 
+@dataclass
+class RunConfig:
+    dry_run: bool
+    max_llm_calls: int
+    tick_limit: int
+
+
+def _log_decision(m: MarketData, d: Decision, fc: Forecast) -> None:
+    jlog(
+        "decision",
+        market_id=m.market_id,
+        question=m.question[:200],
+        flow=d.flow,
+        action=d.action,
+        side=d.side,
+        shares=d.shares,
+        fill_price=round(d.fill_price, 4),
+        edge=round(d.edge, 4),
+        p_calibrated=round(d.p_calibrated, 4),
+        raw_prob=round(fc.raw_prob, 4),
+        calibrated_prob=round(d.p_calibrated, 4),
+        market_mid=round(d.market_mid, 4),
+        primary_prob=round(fc.primary_prob, 4),
+        contrarian_prob=(round(fc.contrarian_prob, 4)
+                         if fc.contrarian_prob is not None else None),
+        rationale=d.rationale,
+    )
+
+
 def _run_one_tick(
     session: BenchmarkSession,
     forecaster: Forecaster,
     participant_idx: int,
-) -> None:
+    cfg: RunConfig,
+) -> bool:
+    """Run one tick. Returns True if a tick was actually claimed and processed
+    (so the outer loop can count it against TICK_LIMIT).
+    """
     tick_started = time.time()
     lease = _claim_with_backoff(session)
     if lease is None:
-        return
+        return False
 
-    jlog("tick_claimed", tick_id=lease.tick_id, candidate_set_id=lease.candidate_set_id)
+    jlog("tick_claimed", tick_id=lease.tick_id, candidate_set_id=lease.candidate_set_id,
+         dry_run=cfg.dry_run, max_llm_calls=cfg.max_llm_calls)
 
     tick = session.load_candidates(lease)
     lease = tick.lease
@@ -562,15 +607,20 @@ def _run_one_tick(
     skipped_mid_band = 0
     skipped_quote = 0
     skipped_low_edge = 0
+    skipped_llm_cap = 0
+    markets_scanned = 0
     held_market_ids = set(view.positions_by_market.keys())
-
-    # First pass: re-evaluate currently held markets (always forecast these so
-    # we can detect edge collapse). Then candidate scan for new opens, sorted
-    # so highest pre-LLM edge potential goes first.
     market_index: dict[str, MarketData] = {m.market_id: m for m in candidates.markets}
 
-    # Re-evaluate held positions even if they would normally be skipped.
+    def _budget_left() -> int:
+        return cfg.max_llm_calls - usage.calls
+
+    # Pass 1: re-evaluate held positions first. They take priority for the
+    # LLM budget because position management depends on a current forecast.
     for market_id in list(held_market_ids):
+        if _budget_left() <= 0:
+            skipped_llm_cap += 1
+            break
         m = market_index.get(market_id)
         if m is None:
             jlog("held_market_vanished", market_id=market_id)
@@ -580,42 +630,27 @@ def _run_one_tick(
             skipped_quote += 1
             continue
         bid, ask, mid = prices
-        fc = forecaster.forecast(m, mid, usage)
+        markets_scanned += 1
+        fc = forecaster.forecast(m, bid, ask, mid, usage)
         if fc is None:
             continue
         for d in _decide_for_market(m, fc, view, bid, ask, mid):
             decisions.append(d)
             _apply_decision_to_view(view, d)
-            jlog(
-                "decision",
-                market_id=m.market_id,
-                question=m.question[:140],
-                flow=d.flow,
-                action=d.action,
-                side=d.side,
-                shares=d.shares,
-                fill_price=round(d.fill_price, 4),
-                edge=round(d.edge, 4),
-                p_calibrated=round(d.p_calibrated, 4),
-                p_raw=round(fc.raw_prob, 4),
-                market_mid=round(d.market_mid, 4),
-                primary_prob=round(fc.primary_prob, 4),
-                contrarian_prob=(round(fc.contrarian_prob, 4)
-                                 if fc.contrarian_prob is not None else None),
-                rationale=d.rationale,
-            )
+            _log_decision(m, d, fc)
 
-    # Second pass: candidate scan for new opens (skip what we already handled).
+    # Pass 2: scan remaining markets for new opens, ranked by |mid - 0.5|
+    # descending so the highest-asymmetry markets are analysed first and the
+    # LLM-call cap bites the least-promising ones.
     remaining = [
         m for m in candidates.markets
         if m.market_id not in held_market_ids
     ]
-    # Sort by distance of mid from 0.5 (extreme markets first — they're cheap
-    # to bet and bigger Kelly fractions when our model differs).
+
     def _scan_key(m: MarketData) -> float:
         prices = _quote_prices(m)
         if prices is None:
-            return 0.0
+            return -1.0
         _, _, mid = prices
         return abs(mid - 0.5)
     remaining.sort(key=_scan_key, reverse=True)
@@ -634,11 +669,14 @@ def _run_one_tick(
             skipped_quote += 1
             continue
         bid, ask, mid = prices
-        # Cost-aware: skip cheap-LLM-time markets where edge is unlikely.
         if SKIP_MID_LOW <= ask <= SKIP_MID_HIGH:
             skipped_mid_band += 1
             continue
-        fc = forecaster.forecast(m, mid, usage)
+        if _budget_left() <= 0:
+            skipped_llm_cap += 1
+            break
+        markets_scanned += 1
+        fc = forecaster.forecast(m, bid, ask, mid, usage)
         if fc is None:
             continue
         signed_edge = fc.calibrated_prob - mid
@@ -650,31 +688,16 @@ def _run_one_tick(
             _apply_decision_to_view(view, d)
             if d.flow in ("open", "flip-buy"):
                 new_opens_this_tick += 1
-            jlog(
-                "decision",
-                market_id=m.market_id,
-                question=m.question[:140],
-                flow=d.flow,
-                action=d.action,
-                side=d.side,
-                shares=d.shares,
-                fill_price=round(d.fill_price, 4),
-                edge=round(d.edge, 4),
-                p_calibrated=round(d.p_calibrated, 4),
-                p_raw=round(fc.raw_prob, 4),
-                market_mid=round(d.market_mid, 4),
-                primary_prob=round(fc.primary_prob, 4),
-                contrarian_prob=(round(fc.contrarian_prob, 4)
-                                 if fc.contrarian_prob is not None else None),
-                rationale=d.rationale,
-            )
+            _log_decision(m, d, fc)
 
     jlog(
         "scan_summary",
         considered=len(candidates.markets),
+        markets_scanned=markets_scanned,
         skipped_mid_band=skipped_mid_band,
         skipped_low_edge=skipped_low_edge,
         skipped_quote=skipped_quote,
+        skipped_llm_cap=skipped_llm_cap,
         decisions=len(decisions),
         llm_calls=usage.calls,
         llm_input_tokens=usage.input_tokens,
@@ -731,7 +754,8 @@ def _run_one_tick(
         if d.shares > 0
     ][:MAX_TRADES_PER_TICK]
 
-    if intents:
+    trades_submitted = 0
+    if intents and not cfg.dry_run:
         elapsed = time.time() - tick_started
         if elapsed > SUBMISSION_DEADLINE_SECS - 30:
             jlog("submission_deadline_risk", elapsed_sec=round(elapsed, 1),
@@ -743,15 +767,37 @@ def _run_one_tick(
                  notional=fill.notional)
         for rej in result.rejections:
             jlog("reject", intent_id=rej.intent_id, reason=rej.reason)
-        jlog("submission_summary", accepted=result.accepted, rejected=result.rejected,
-             submitted=len(intents))
+        jlog("submission_summary", accepted=result.accepted,
+             rejected=result.rejected, submitted=len(intents))
+        trades_submitted = result.accepted
+    elif intents and cfg.dry_run:
+        jlog("dry_run_skip_submit", would_submit=len(intents),
+             intents=[{"market_id": d.market_id, "action": d.action,
+                       "side": d.side, "shares": int(d.shares)}
+                      for d in decisions[:MAX_TRADES_PER_TICK] if d.shares > 0])
     else:
         jlog("no_trades_this_tick")
 
     session.finalize(lease, participant_idx)
     session.complete_tick(lease)
-    jlog("tick_done", tick_id=lease.tick_id,
-         elapsed_sec=round(time.time() - tick_started, 2))
+
+    # Re-read the portfolio so the tick summary reflects post-fill state.
+    post = session.get_portfolio(participant_idx) if not cfg.dry_run else portfolio
+    post_view = _summarize_portfolio(post)
+    jlog(
+        "tick_summary",
+        tick_id=lease.tick_id,
+        markets_scanned=markets_scanned,
+        llm_calls_made=usage.calls,
+        trades_submitted=trades_submitted,
+        intents_built=len(intents),
+        dry_run=cfg.dry_run,
+        current_cash=round(post_view.cash, 2),
+        current_equity=round(post_view.equity, 2),
+        total_positions=post_view.open_count,
+        elapsed_sec=round(time.time() - tick_started, 2),
+    )
+    return True
 
 
 def _claim_with_backoff(session: BenchmarkSession) -> TickLease | None:
@@ -777,6 +823,23 @@ def _require_env(name: str) -> str:
     return value
 
 
+def _env_bool(name: str, default: bool = False) -> bool:
+    raw = os.environ.get(name, "").strip().lower()
+    if not raw:
+        return default
+    return raw in ("1", "true", "yes", "on")
+
+
+def _env_int(name: str, default: int) -> int:
+    raw = os.environ.get(name, "").strip()
+    if not raw:
+        return default
+    try:
+        return int(raw)
+    except ValueError:
+        return default
+
+
 def run() -> None:
     load_dotenv()
     _setup_logging()
@@ -785,13 +848,22 @@ def run() -> None:
     api_key = _require_env("PA_SERVER_API_KEY")
     _require_env("ANTHROPIC_API_KEY")  # used implicitly by anthropic SDK
 
+    cfg = RunConfig(
+        dry_run=_env_bool("BOT_DRY_RUN", False),
+        max_llm_calls=max(0, _env_int("MAX_LLM_CALLS_PER_TICK",
+                                      DEFAULT_MAX_LLM_CALLS_PER_TICK)),
+        tick_limit=max(0, _env_int("TICK_LIMIT", DEFAULT_TICK_LIMIT)),
+    )
+
     import anthropic
     anthropic_client = anthropic.Anthropic()
     forecaster = Forecaster(anthropic_client)
 
     api = ServerAPIClient(base_url=base_url, api_key=api_key, timeout=30)
     jlog("bot_start", slug=SLUG, n_ticks=N_TICKS, base_url=base_url,
-         config_hash=CONFIG_HASH, model=LLM_MODEL)
+         config_hash=CONFIG_HASH, model=LLM_MODEL,
+         dry_run=cfg.dry_run, max_llm_calls_per_tick=cfg.max_llm_calls,
+         tick_limit=cfg.tick_limit)
 
     with BenchmarkSession(api) as session:
         exp = session.create_experiment(
@@ -810,9 +882,12 @@ def run() -> None:
         jlog("participant_ready", participant_idx=part.participant_idx,
              created=part.created)
 
+        ticks_done = 0
         while True:
             try:
-                _run_one_tick(session, forecaster, part.participant_idx)
+                processed = _run_one_tick(
+                    session, forecaster, part.participant_idx, cfg
+                )
             except KeyboardInterrupt:
                 jlog("bot_interrupt")
                 return
@@ -821,6 +896,14 @@ def run() -> None:
             except Exception as e:
                 jlog("tick_error", error=str(e), error_type=type(e).__name__)
                 time.sleep(30)
+                continue
+
+            if processed:
+                ticks_done += 1
+                if cfg.tick_limit and ticks_done >= cfg.tick_limit:
+                    jlog("tick_limit_reached", ticks_done=ticks_done,
+                         tick_limit=cfg.tick_limit)
+                    return
 
 
 if __name__ == "__main__":
