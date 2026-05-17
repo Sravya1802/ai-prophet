@@ -5,7 +5,8 @@
 
 [![Python 3.11+](https://img.shields.io/badge/python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/downloads/)
 [![License: MIT](https://img.shields.io/badge/license-MIT-22863a)](LICENSE)
-[![LLM: Groq Llama 3.3 70B](https://img.shields.io/badge/LLM-Groq%20Llama%203.3%2070B-F55036)](https://groq.com)
+[![LLM: Groq Llama 3.3 70B](https://img.shields.io/badge/voice%201-Groq%20Llama%203.3%2070B-F55036)](https://groq.com)
+[![LLM: xAI Grok 4](https://img.shields.io/badge/voice%202-xAI%20Grok%204-000000)](https://x.ai)
 [![Runtime: ai-prophet-core](https://img.shields.io/badge/runtime-ai--prophet--core-1F8FFF)](https://pypi.org/project/ai-prophet-core/)
 [![Slug](https://img.shields.io/badge/run%20slug-eval__gradientprophets-555)](https://www.prophethacks.com/leaderboard/eval_gradientprophets?rep=0)
 
@@ -23,11 +24,11 @@
 |---|---|
 | **Slug** | `eval_gradientprophets` |
 | **Model** | `custom:ensemble-kelly` (our code) |
-| **Forecaster** | Groq `llama-3.3-70b-versatile` (free tier) |
+| **Forecasters** | Groq `llama-3.3-70b-versatile` ⊕ xAI `grok-4-fast-reasoning` |
 | **Sizing** | 0.25× fractional Kelly, capped at $1k / market and $10k gross |
 | **Filter** | Trade only when `|edge| > 0.10`; skip tail markets (`ask < 0.05` or `> 0.95`) |
 | **Calibration** | Anchor to market mid: `p' = 0.7·p + 0.3·mid` |
-| **Cost** | $0 (Groq free tier · no Kalshi key needed) |
+| **Cost** | Groq free tier + ~$3-10 of xAI credits over 14 days |
 | **Live leaderboard** | https://www.prophethacks.com/leaderboard/eval_gradientprophets?rep=0 |
 
 ---
@@ -62,8 +63,11 @@ git clone https://github.com/Sravya1802/ai-prophet.git
 cd ai-prophet
 
 cp .env.example .env
-# fill in PA_SERVER_API_KEY (from the Prophet Arena operators on Discord)
-# and GROQ_API_KEY (free tier from console.groq.com)
+# fill in:
+#   PA_SERVER_API_KEY (from the Prophet Arena operators on Discord)
+#   GROQ_API_KEY     (free tier from console.groq.com)
+#   XAI_API_KEY      (paid; from console.x.ai — bot still runs without it
+#                    but falls back to Groq-only ensemble)
 
 ./run.sh
 ```
@@ -132,13 +136,25 @@ ai-prophet/
 
 `bot.py` is one self-contained file organised into four layers:
 
-### 1. Forecaster
-Wraps Groq's OpenAI-compatible chat completions API
-(`llama-3.3-70b-versatile`). Each LLM call returns a strict JSON
-`{p_yes, rationale}` via `response_format={"type": "json_object"}`. A
-primary call plus a *contrarian audit* second call on high-divergence
-markets are combined via the **geometric mean of odds**. Pre-flight
-budget checks make `MAX_LLM_CALLS_PER_TICK` a hard limit.
+### 1. Forecaster — multi-provider ensemble
+
+Two voices query each market independently:
+
+- **Voice 1** — Groq `llama-3.3-70b-versatile` (free tier).
+- **Voice 2** — xAI `grok-4-fast-reasoning` (paid, OpenAI-compatible
+  at `api.x.ai/v1`).
+
+Both use the same calibrated-forecaster prompt and the same strict
+JSON schema (`response_format={"type": "json_object"}`). Because the
+two models share no training pipeline, their disagreements are
+**genuinely independent** — unlike a same-model primary+contrarian,
+which is one model re-arguing with itself.
+
+Combination: **geometric mean of YES odds**. Then anchored to the
+market mid via `_calibrate`. If the xAI key is absent or its API
+fails, the bot **degrades gracefully** to Groq-only. Pre-flight
+budget checks make `MAX_LLM_CALLS_PER_TICK` a hard limit (each
+market consumes up to 2 calls in ensemble mode).
 
 ### 2. Pricing helpers
 Translates a `MarketQuote` into BUY/SELL fill prices honouring Prophet
@@ -177,20 +193,32 @@ bot mid-experiment.
 
 ## 🧪 Six differentiators
 
-### 1️⃣ Ensemble forecasting (primary + contrarian audit)
+### 1️⃣ Multi-provider ensemble forecasting
 
-Every candidate market gets a calibrated forecast from Llama 3.3 70B.
-If the primary estimate diverges from the market mid by **more than
-0.10**, a second contrarian call fires that explicitly challenges the
-first answer. Combined via the **geometric mean of YES odds**:
+Every candidate market gets **two independent calibrated forecasts**:
+
+| Voice | Provider | Model | Strength |
+|---|---|---|---|
+| 1 | Groq | `llama-3.3-70b-versatile` | Fast, free, strong general reasoning |
+| 2 | xAI | `grok-4-fast-reasoning` | Top-tier reasoning, real-time-aware |
+
+Both receive the same calibrated-forecaster prompt and the same
+strict JSON schema. The two `p_yes` estimates are combined via the
+**geometric mean of YES odds**:
 
 ```
 final_p = √(p₁·p₂) / ( √(p₁·p₂) + √((1−p₁)·(1−p₂)) )
 ```
 
-The geometric mean of odds preserves the prior when the two agree
-and cancels overconfidence when they don't — better than the
-arithmetic mean, which is biased near extremes.
+The geometric mean of odds preserves the consensus when both voices
+agree and is symmetric under YES/NO swap (unlike the arithmetic
+mean, which is biased near extremes).
+
+Because Llama and Grok come from entirely different training
+pipelines, their disagreements are genuinely independent — much
+more useful than a same-model primary+contrarian, which is one
+model re-arguing with itself. If the xAI key is unavailable, the
+forecaster degrades gracefully to Groq-only and still trades.
 
 ### 2️⃣ Kelly criterion sizing
 
@@ -248,18 +276,21 @@ muting genuine disagreement.
 
 ### 6️⃣ Cost-aware LLM usage
 
-- **Provider**: Groq free tier (`llama-3.3-70b-versatile`).
-- **Endpoint**: OpenAI-compatible `chat.completions`
+- **Providers**: Groq (`llama-3.3-70b-versatile`, free tier) ⊕ xAI
+  (`grok-4-fast-reasoning`, paid).
+- **Endpoints**: both OpenAI-compatible `chat.completions`
   (`response_format={"type": "json_object"}`, `temperature=0.3`,
   `max_tokens=200`).
 - System prompts are **under 200 tokens**; user payloads are capped at
   question + 600-char description + bid/ask/mid.
 - `MAX_LLM_CALLS_PER_TICK` is a **hard limit** — held-position
   re-forecasting runs first, the candidate scan stops once budget
-  is exhausted.
+  is exhausted. Each market consumes up to 2 calls in ensemble mode.
 - `scan_summary` event logs `llm_calls`, `llm_input_tokens`,
   `llm_output_tokens` per tick.
-- **Total LLM spend over the 14-day window: $0.**
+- **Estimated total LLM spend over the 14-day window: $3-10** —
+  Groq calls are free; xAI charges per token at `grok-4-fast-reasoning`
+  pricing ($0.20/M input, $0.50/M output).
 
 ---
 

@@ -52,5 +52,10 @@ if (( ${#missing[@]} > 0 )); then
   exit 1
 fi
 
+# XAI_API_KEY is optional — if absent the bot runs Groq-only.
+if [[ -z "${XAI_API_KEY:-}" || "${XAI_API_KEY}" == your-* ]]; then
+  echo ">>> XAI_API_KEY not set — ensemble degraded to Groq-only mode"
+fi
+
 echo ">>> launching bot.py (slug=${BOT_SLUG_OVERRIDE:-eval_sravya})"
 exec python bot.py

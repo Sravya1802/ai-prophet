@@ -55,8 +55,15 @@ from ai_prophet_core.ruleset import (
 SLUG = "eval_gradientprophets"
 N_TICKS = 1500  # 14-day eval window (1,344 ticks) + small buffer
 STARTING_CASH = 10_000.0
-LLM_PROVIDER = "groq"
-LLM_MODEL = "llama-3.3-70b-versatile"
+
+# Two-provider ensemble. Each market is forecast by both voices; the two
+# independent estimates are combined via geometric mean of YES odds.
+# Voice 1: Groq Llama 3.3 70B (free tier).
+# Voice 2: xAI Grok 4 (paid; OpenAI-compatible at api.x.ai/v1).
+LLM_ENSEMBLE_PROVIDERS = ["groq", "xai"]
+LLM_GROQ_MODEL = "llama-3.3-70b-versatile"
+LLM_XAI_MODEL = "grok-4-fast-reasoning"
+LLM_XAI_BASE_URL = "https://api.x.ai/v1"
 
 # Runtime knobs (read from env at startup; not hashed into config_hash):
 #   BOT_DRY_RUN              — "true" / "1" to skip submit_intents (default off)
@@ -100,9 +107,11 @@ SUBMISSION_DEADLINE_SECS = 540    # match TICK_SUBMISSION_DEADLINE_SECS
 
 CONFIG_JSON: dict[str, Any] = {
     "strategy": "ensemble-kelly",
-    "version": "1.0",
+    "version": "2.0",
     "llm": {
-        "model": LLM_MODEL,
+        "providers": LLM_ENSEMBLE_PROVIDERS,
+        "groq_model": LLM_GROQ_MODEL,
+        "xai_model": LLM_XAI_MODEL,
         "ensemble_divergence": ENSEMBLE_DIVERGENCE,
         "combine": "geometric-mean-of-odds",
     },
@@ -168,21 +177,13 @@ def dlog(event: str, **fields: Any) -> None:
                                 default=str, sort_keys=True))
 
 
-# --- Forecasting (Anthropic ensemble) ----------------------------------------
+# --- Forecasting (multi-provider ensemble) -----------------------------------
 
 PRIMARY_SYSTEM_PROMPT = (
     "You are a calibrated forecaster pricing binary prediction markets. "
     "Given a market question, estimate the probability YES resolves TRUE. "
     "Be calibrated, not bold: if you lack a real informational edge, return "
     "a probability within 0.05 of the market mid-price. "
-    'Reply with ONLY this JSON: {"p_yes": <0..1 float>, "rationale": "<<=20 words>"}.'
-)
-
-CONTRARIAN_SYSTEM_PROMPT = (
-    "You are a contrarian forecaster auditing a prior estimate that disagrees "
-    "with the market by more than 10 points. Argue the other side, then return "
-    "your own independent probability. If the prior estimate looked overconfident, "
-    "say so by returning a probability nearer the market mid. "
     'Reply with ONLY this JSON: {"p_yes": <0..1 float>, "rationale": "<<=20 words>"}.'
 )
 
@@ -203,9 +204,9 @@ class TokenUsage:
 class Forecast:
     raw_prob: float            # ensemble raw probability (pre-calibration)
     calibrated_prob: float     # post-calibration probability used for trading
-    primary_prob: float
-    contrarian_prob: float | None
-    rationale: str             # last rationale string
+    primary_prob: float        # voice 1 (Groq Llama) probability
+    contrarian_prob: float | None  # voice 2 (xAI Grok) probability; None if degraded
+    rationale: str             # rationale from whichever voice deviated more from mid
 
 
 _JSON_BLOCK = re.compile(r"\{[\s\S]*\}")
@@ -246,29 +247,46 @@ def _geometric_mean_of_odds(p1: float, p2: float) -> float:
 
 
 class Forecaster:
-    """Two-stage LLM forecaster (Groq, OpenAI-compatible) with cost-aware
-    shortcuts and a strict per-tick call budget."""
+    """Multi-provider LLM forecaster.
 
-    def __init__(self, groq_client: Any) -> None:
-        self.client = groq_client
+    Two voices are queried per market — Groq Llama 3.3 70B and xAI Grok 4
+    — each with the same calibrated-forecaster prompt. Because the two
+    models share no training pipeline, their disagreements are *genuinely*
+    independent (unlike a same-model primary+contrarian, which is just
+    one model re-arguing with itself).
 
-    def _ask(self, system: str, question: str, description: str,
-             bid: float, ask: float, mid: float,
-             usage: TokenUsage,
-             market_id: str = "", call_kind: str = "primary") -> tuple[float, str]:
-        # Keep the user message compact (cost-aware: short context).
+    Combination: geometric mean of YES odds. The result is then anchored
+    to the market mid by ``_calibrate``.
+
+    Cost-aware: a per-tick budget caps total LLM calls. If the xAI key
+    is unavailable, the forecaster degrades gracefully to Groq-only.
+    """
+
+    def __init__(self, groq_client: Any, xai_client: Any | None = None) -> None:
+        self.groq_client = groq_client
+        self.xai_client = xai_client
+
+    @staticmethod
+    def _build_user_message(question: str, description: str,
+                            bid: float, ask: float, mid: float) -> str:
         desc = (description or "").strip()
         if len(desc) > 600:
             desc = desc[:600] + "..."
-        user = (
+        return (
             f"Question: {question}\n"
             f"Description: {desc}\n"
             f"Market quote: best_bid={bid:.3f} best_ask={ask:.3f} "
             f"(mid={mid:.3f} = implied P(YES))\n"
             "Respond with ONLY a JSON object matching the schema."
         )
-        resp = self.client.chat.completions.create(
-            model=LLM_MODEL,
+
+    def _ask(self, client: Any, model: str, provider: str,
+             system: str, question: str, description: str,
+             bid: float, ask: float, mid: float,
+             usage: TokenUsage, market_id: str = "") -> tuple[float, str]:
+        user = self._build_user_message(question, description, bid, ask, mid)
+        resp = client.chat.completions.create(
+            model=model,
             messages=[
                 {"role": "system", "content": system},
                 {"role": "user", "content": user},
@@ -284,77 +302,102 @@ class Forecaster:
         except AttributeError:
             in_t, out_t = 0, 0
         usage.add(in_t, out_t)
-        dlog("llm_response_raw", market_id=market_id, call=call_kind,
-             content=content, prompt_tokens=in_t, completion_tokens=out_t)
+        dlog("llm_response_raw", market_id=market_id, provider=provider,
+             model=model, content=content,
+             prompt_tokens=in_t, completion_tokens=out_t)
         return _parse_json_prob(content)
+
+    def _ask_groq(self, market: MarketData, bid: float, ask: float, mid: float,
+                  usage: TokenUsage) -> tuple[float, str] | None:
+        try:
+            return self._ask(
+                self.groq_client, LLM_GROQ_MODEL, "groq",
+                PRIMARY_SYSTEM_PROMPT, market.question, market.description or "",
+                bid, ask, mid, usage, market_id=market.market_id,
+            )
+        except Exception as e:
+            jlog("llm_groq_failed", market_id=market.market_id, error=str(e))
+            return None
+
+    def _ask_xai(self, market: MarketData, bid: float, ask: float, mid: float,
+                 usage: TokenUsage) -> tuple[float, str] | None:
+        if self.xai_client is None:
+            return None
+        try:
+            return self._ask(
+                self.xai_client, LLM_XAI_MODEL, "xai",
+                PRIMARY_SYSTEM_PROMPT, market.question, market.description or "",
+                bid, ask, mid, usage, market_id=market.market_id,
+            )
+        except Exception as e:
+            jlog("llm_xai_failed", market_id=market.market_id, error=str(e))
+            return None
 
     def forecast(self, market: MarketData, bid: float, ask: float, mid: float,
                  usage: TokenUsage, max_calls: int) -> Forecast | None:
-        """Returns None if the per-tick LLM budget is exhausted before we
-        get any usable estimate. If the budget is exhausted between the
-        primary and contrarian calls, returns the primary-only forecast.
+        """Run both voices and ensemble.
+
+        Returns ``None`` if the per-tick budget is exhausted before any
+        usable estimate. Returns a Groq-only forecast if xAI is unavailable
+        or fails after Groq succeeds (graceful degradation).
         """
-        # Hard pre-call budget check.
+        # Voice 1: Groq.
         if usage.calls >= max_calls:
             jlog("llm_budget_exhausted_pre_primary",
                  market_id=market.market_id,
                  calls=usage.calls, max_calls=max_calls)
             return None
+        groq_result = self._ask_groq(market, bid, ask, mid, usage)
 
-        try:
-            p1, rationale1 = self._ask(
-                PRIMARY_SYSTEM_PROMPT, market.question, market.description or "",
-                bid, ask, mid, usage,
-                market_id=market.market_id, call_kind="primary",
-            )
-        except Exception as e:
-            jlog("llm_primary_failed", market_id=market.market_id, error=str(e))
+        # Voice 2: xAI. Only call if Groq succeeded (otherwise budget on
+        # a failing primary is wasted) AND we still have budget.
+        xai_result = None
+        if groq_result is not None and self.xai_client is not None:
+            if usage.calls >= max_calls:
+                jlog("llm_budget_exhausted_pre_xai",
+                     market_id=market.market_id,
+                     calls=usage.calls, max_calls=max_calls)
+            else:
+                xai_result = self._ask_xai(market, bid, ask, mid, usage)
+
+        # Build the Forecast from whatever we got back.
+        if groq_result is None and xai_result is None:
             return None
 
-        # Ensemble: contrarian audit only on high-divergence markets.
-        if abs(p1 - mid) <= ENSEMBLE_DIVERGENCE:
-            calibrated = _calibrate(p1, mid)
+        if groq_result is None:
+            # Only xAI succeeded -- rare, but use it.
+            p_xai, rationale = xai_result  # type: ignore[misc]
+            calibrated = _calibrate(p_xai, mid)
             return Forecast(
-                raw_prob=p1, calibrated_prob=calibrated,
-                primary_prob=p1, contrarian_prob=None, rationale=rationale1,
+                raw_prob=p_xai, calibrated_prob=calibrated,
+                primary_prob=p_xai, contrarian_prob=None,
+                rationale=rationale,
             )
 
-        # Pre-flight check before the contrarian call too.
-        if usage.calls >= max_calls:
-            jlog("llm_budget_exhausted_pre_contrarian",
-                 market_id=market.market_id,
-                 calls=usage.calls, max_calls=max_calls)
-            calibrated = _calibrate(p1, mid)
+        if xai_result is None:
+            # Groq-only path (no xAI key, or xAI failed/over-budget).
+            p_groq, rationale = groq_result
+            calibrated = _calibrate(p_groq, mid)
             return Forecast(
-                raw_prob=p1, calibrated_prob=calibrated,
-                primary_prob=p1, contrarian_prob=None, rationale=rationale1,
+                raw_prob=p_groq, calibrated_prob=calibrated,
+                primary_prob=p_groq, contrarian_prob=None,
+                rationale=rationale,
             )
 
-        try:
-            contrarian_user = (
-                f"A prior forecaster said p_yes={p1:.3f} for: '{market.question}'.\n"
-                f"The market trades at mid={mid:.3f} "
-                f"(best_bid={bid:.3f}, best_ask={ask:.3f}). "
-                "The gap is unusually wide."
-            )
-            p2, rationale2 = self._ask(
-                CONTRARIAN_SYSTEM_PROMPT, contrarian_user, market.description or "",
-                bid, ask, mid, usage,
-                market_id=market.market_id, call_kind="contrarian",
-            )
-        except Exception as e:
-            jlog("llm_contrarian_failed", market_id=market.market_id, error=str(e))
-            calibrated = _calibrate(p1, mid)
-            return Forecast(
-                raw_prob=p1, calibrated_prob=calibrated,
-                primary_prob=p1, contrarian_prob=None, rationale=rationale1,
-            )
-
-        ensemble = _geometric_mean_of_odds(p1, p2)
+        # True ensemble: both voices responded.
+        p_groq, rationale_groq = groq_result
+        p_xai, rationale_xai = xai_result
+        ensemble = _geometric_mean_of_odds(p_groq, p_xai)
         calibrated = _calibrate(ensemble, mid)
+        # Pick whichever rationale is more "directional" -- whichever
+        # forecast deviates further from the market mid.
+        if abs(p_xai - mid) >= abs(p_groq - mid):
+            rationale = rationale_xai or rationale_groq
+        else:
+            rationale = rationale_groq or rationale_xai
         return Forecast(
             raw_prob=ensemble, calibrated_prob=calibrated,
-            primary_prob=p1, contrarian_prob=p2, rationale=rationale2 or rationale1,
+            primary_prob=p_groq, contrarian_prob=p_xai, rationale=rationale,
         )
 
 
@@ -967,6 +1010,10 @@ def run() -> None:
     base_url = os.environ.get("PA_SERVER_URL", "https://api.aiprophet.dev")
     api_key = _require_env("PA_SERVER_API_KEY")
     groq_api_key = _require_env("GROQ_API_KEY")
+    # XAI_API_KEY is optional — if missing, the ensemble degrades to Groq-only
+    # with a warning. This keeps the bot resilient if the xAI account hits
+    # a billing cap mid-eval.
+    xai_api_key = os.environ.get("XAI_API_KEY", "").strip()
 
     cfg = RunConfig(
         dry_run=_env_bool("BOT_DRY_RUN", False),
@@ -980,11 +1027,23 @@ def run() -> None:
 
     from groq import Groq
     groq_client = Groq(api_key=groq_api_key)
-    forecaster = Forecaster(groq_client)
+
+    xai_client = None
+    if xai_api_key:
+        from openai import OpenAI
+        xai_client = OpenAI(api_key=xai_api_key, base_url=LLM_XAI_BASE_URL)
+    else:
+        jlog("xai_key_missing", note="ensemble degraded to Groq-only "
+             "(set XAI_API_KEY in .env to enable both voices)")
+
+    forecaster = Forecaster(groq_client, xai_client=xai_client)
 
     api = ServerAPIClient(base_url=base_url, api_key=api_key, timeout=30)
     jlog("bot_start", slug=SLUG, n_ticks=N_TICKS, base_url=base_url,
-         config_hash=CONFIG_HASH, provider=LLM_PROVIDER, model=LLM_MODEL,
+         config_hash=CONFIG_HASH,
+         providers=LLM_ENSEMBLE_PROVIDERS if xai_client else ["groq"],
+         groq_model=LLM_GROQ_MODEL,
+         xai_model=LLM_XAI_MODEL if xai_client else None,
          dry_run=cfg.dry_run, max_llm_calls_per_tick=cfg.max_llm_calls,
          tick_limit=cfg.tick_limit,
          edge_threshold=cfg.edge_threshold,
