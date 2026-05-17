@@ -73,6 +73,13 @@ EDGE_EXIT_THRESHOLD = 0.05        # exit a held side when edge shrinks below thi
 ENSEMBLE_DIVERGENCE = 0.10        # |raw_prob - mid| beyond this triggers contrarian call
 SKIP_MID_LOW = 0.40               # skip LLM call when best_ask sits inside this band
 SKIP_MID_HIGH = 0.60
+# Skip far-tail markets pre-LLM. For best_ask < 0.05 or > 0.95 the market
+# is already pricing the outcome as near-certain in one direction; our
+# linear calibration (+0.075 intercept) creates phantom edge of ~0.075
+# against the true tail probability. These trades almost always lose.
+# This filter is not part of CONFIG_JSON so config_hash stays stable.
+SKIP_TAIL_LOW = 0.05
+SKIP_TAIL_HIGH = 0.95
 
 # Probability calibration: shrinks [0,1] -> [0.075, 0.925]
 CALIBRATION_SLOPE = 0.85
@@ -651,6 +658,7 @@ def _run_one_tick(
     usage = TokenUsage()
     decisions: list[Decision] = []
     skipped_mid_band = 0
+    skipped_tail = 0
     skipped_quote = 0
     skipped_low_edge = 0
     skipped_llm_cap = 0
@@ -734,6 +742,13 @@ def _run_one_tick(
         if SKIP_MID_LOW <= ask <= SKIP_MID_HIGH:
             skipped_mid_band += 1
             continue
+        # Pre-LLM tail filter: best_ask outside [0.05, 0.95] is too extreme
+        # for our linear calibration to handle cleanly (it would create a
+        # ~0.075 phantom edge against the true tail probability and lure
+        # us into buying near-certain losers).
+        if ask < SKIP_TAIL_LOW or ask > SKIP_TAIL_HIGH:
+            skipped_tail += 1
+            continue
         if _budget_left() <= 0:
             skipped_llm_cap += 1
             break
@@ -772,6 +787,7 @@ def _run_one_tick(
         considered=len(candidates.markets),
         markets_scanned=markets_scanned,
         skipped_mid_band=skipped_mid_band,
+        skipped_tail=skipped_tail,
         skipped_low_edge=skipped_low_edge,
         skipped_quote=skipped_quote,
         skipped_llm_cap=skipped_llm_cap,
