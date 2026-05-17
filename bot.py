@@ -52,7 +52,7 @@ from ai_prophet_core.ruleset import (
 
 # --- Strategy constants -------------------------------------------------------
 
-SLUG = "sravya-ensemble-kelly-v1"
+SLUG = "sravya-ensemble-kelly-v2"
 N_TICKS = 1344  # 14 days * 96 ticks/day
 STARTING_CASH = 10_000.0
 LLM_PROVIDER = "groq"

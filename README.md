@@ -57,7 +57,7 @@ python bot.py | jq -c 'select(.event == "decision")'
 
 To stop, send SIGINT. Restarting with the same `SLUG` and
 `CONFIG_HASH` resumes the existing experiment server-side — the slug
-`sravya-ensemble-kelly-v1` is reserved for this entry.
+`sravya-ensemble-kelly-v2` is reserved for this entry.
 
 ## Architecture
 
@@ -99,7 +99,7 @@ transient SDK or LLM failure cannot crash the bot mid-experiment.
 
 | param | value | meaning |
 |---|---|---|
-| `SLUG` | `sravya-ensemble-kelly-v1` | experiment slug (one bot per slug) |
+| `SLUG` | `sravya-ensemble-kelly-v2` | experiment slug (one bot per slug) |
 | `N_TICKS` | 1344 | 14 days × 96 ticks/day |
 | `STARTING_CASH` | $10,000 | mandatory |
 | `EDGE_OPEN_THRESHOLD` | 0.10 | open a new trade only if \|edge\| > 0.10 |
