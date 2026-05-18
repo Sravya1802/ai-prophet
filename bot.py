@@ -262,7 +262,11 @@ class Forecaster:
     is unavailable, the forecaster degrades gracefully to Groq-only.
     """
 
-    def __init__(self, groq_client: Any, xai_client: Any | None = None) -> None:
+    def __init__(self, groq_client: Any | None = None,
+                 xai_client: Any | None = None) -> None:
+        # Either client may be None — the forecaster will simply skip
+        # that provider. Useful for running in single-voice mode when
+        # one provider is rate-limited or the user wants to drop it.
         self.groq_client = groq_client
         self.xai_client = xai_client
 
@@ -309,6 +313,8 @@ class Forecaster:
 
     def _ask_groq(self, market: MarketData, bid: float, ask: float, mid: float,
                   usage: TokenUsage) -> tuple[float, str] | None:
+        if self.groq_client is None:
+            return None
         try:
             return self._ask(
                 self.groq_client, LLM_GROQ_MODEL, "groq",
@@ -346,14 +352,16 @@ class Forecaster:
         Returns ``None`` only if both voices fail or the budget is
         exhausted before either runs.
         """
-        # Voice 1: Groq.
+        # Voice 1: Groq. Skipped entirely when client is None (e.g. when
+        # GROQ_API_KEY is unset and the bot is in xAI-only mode).
         groq_result = None
-        if usage.calls >= max_calls:
-            jlog("llm_budget_exhausted_pre_primary",
-                 market_id=market.market_id,
-                 calls=usage.calls, max_calls=max_calls)
-        else:
-            groq_result = self._ask_groq(market, bid, ask, mid, usage)
+        if self.groq_client is not None:
+            if usage.calls >= max_calls:
+                jlog("llm_budget_exhausted_pre_primary",
+                     market_id=market.market_id,
+                     calls=usage.calls, max_calls=max_calls)
+            else:
+                groq_result = self._ask_groq(market, bid, ask, mid, usage)
 
         # Voice 2: xAI. Fires independently of the Groq outcome — when
         # Groq is rate-limited we still want xAI to produce a forecast
@@ -1016,11 +1024,16 @@ def run() -> None:
 
     base_url = os.environ.get("PA_SERVER_URL", "https://api.aiprophet.dev")
     api_key = _require_env("PA_SERVER_API_KEY")
-    groq_api_key = _require_env("GROQ_API_KEY")
-    # XAI_API_KEY is optional — if missing, the ensemble degrades to Groq-only
-    # with a warning. This keeps the bot resilient if the xAI account hits
-    # a billing cap mid-eval.
+    # Either GROQ_API_KEY or XAI_API_KEY must be set (or both). Each is
+    # optional individually so the bot can run as a single-voice
+    # forecaster when one provider is rate-limited or you don't want to
+    # use it at all.
+    groq_api_key = os.environ.get("GROQ_API_KEY", "").strip()
     xai_api_key = os.environ.get("XAI_API_KEY", "").strip()
+    if not groq_api_key and not xai_api_key:
+        raise RuntimeError(
+            "At least one of GROQ_API_KEY or XAI_API_KEY must be set."
+        )
 
     cfg = RunConfig(
         dry_run=_env_bool("BOT_DRY_RUN", False),
@@ -1032,24 +1045,31 @@ def run() -> None:
         log_level=log_level,
     )
 
-    from groq import Groq
-    groq_client = Groq(api_key=groq_api_key)
+    groq_client = None
+    if groq_api_key:
+        from groq import Groq
+        groq_client = Groq(api_key=groq_api_key)
+    else:
+        jlog("groq_disabled", note="GROQ_API_KEY not set — running xAI-only")
 
     xai_client = None
     if xai_api_key:
         from openai import OpenAI
         xai_client = OpenAI(api_key=xai_api_key, base_url=LLM_XAI_BASE_URL)
     else:
-        jlog("xai_key_missing", note="ensemble degraded to Groq-only "
-             "(set XAI_API_KEY in .env to enable both voices)")
+        jlog("xai_disabled", note="XAI_API_KEY not set — running Groq-only")
 
-    forecaster = Forecaster(groq_client, xai_client=xai_client)
+    forecaster = Forecaster(groq_client=groq_client, xai_client=xai_client)
+
+    active_providers = [
+        p for p, c in (("groq", groq_client), ("xai", xai_client)) if c is not None
+    ]
 
     api = ServerAPIClient(base_url=base_url, api_key=api_key, timeout=30)
     jlog("bot_start", slug=SLUG, n_ticks=N_TICKS, base_url=base_url,
          config_hash=CONFIG_HASH,
-         providers=LLM_ENSEMBLE_PROVIDERS if xai_client else ["groq"],
-         groq_model=LLM_GROQ_MODEL,
+         providers=active_providers,
+         groq_model=LLM_GROQ_MODEL if groq_client else None,
          xai_model=LLM_XAI_MODEL if xai_client else None,
          dry_run=cfg.dry_run, max_llm_calls_per_tick=cfg.max_llm_calls,
          tick_limit=cfg.tick_limit,
