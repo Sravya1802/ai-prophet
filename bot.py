@@ -335,24 +335,31 @@ class Forecaster:
 
     def forecast(self, market: MarketData, bid: float, ask: float, mid: float,
                  usage: TokenUsage, max_calls: int) -> Forecast | None:
-        """Run both voices and ensemble.
+        """Run both voices independently and ensemble.
 
-        Returns ``None`` if the per-tick budget is exhausted before any
-        usable estimate. Returns a Groq-only forecast if xAI is unavailable
-        or fails after Groq succeeds (graceful degradation).
+        Both voices are queried independently (subject to the per-tick
+        budget). This means a Groq failure does NOT prevent the xAI call
+        from firing — important because Groq's free-tier daily token
+        limit (TPD) is easy to exhaust, and we want xAI to keep
+        producing forecasts when Groq is rate-limited.
+
+        Returns ``None`` only if both voices fail or the budget is
+        exhausted before either runs.
         """
         # Voice 1: Groq.
+        groq_result = None
         if usage.calls >= max_calls:
             jlog("llm_budget_exhausted_pre_primary",
                  market_id=market.market_id,
                  calls=usage.calls, max_calls=max_calls)
-            return None
-        groq_result = self._ask_groq(market, bid, ask, mid, usage)
+        else:
+            groq_result = self._ask_groq(market, bid, ask, mid, usage)
 
-        # Voice 2: xAI. Only call if Groq succeeded (otherwise budget on
-        # a failing primary is wasted) AND we still have budget.
+        # Voice 2: xAI. Fires independently of the Groq outcome — when
+        # Groq is rate-limited we still want xAI to produce a forecast
+        # so the bot stays productive.
         xai_result = None
-        if groq_result is not None and self.xai_client is not None:
+        if self.xai_client is not None:
             if usage.calls >= max_calls:
                 jlog("llm_budget_exhausted_pre_xai",
                      market_id=market.market_id,
