@@ -534,6 +534,7 @@ def _decide_for_market(
     ask: float,
     mid: float,
     edge_threshold: float = EDGE_OPEN_THRESHOLD,
+    edge_exit_threshold: float = EDGE_EXIT_THRESHOLD,
 ) -> list[Decision]:
     """Produce zero or more intents for a single market.
 
@@ -563,7 +564,7 @@ def _decide_for_market(
         held_edge = held_p_eff - held_buy_price
 
         flip_required = want_side is not None and want_side != held_side
-        weakened = held_edge < EDGE_EXIT_THRESHOLD
+        weakened = held_edge < edge_exit_threshold
 
         if held_shares > 0 and (flip_required or weakened):
             sell_price = _fill_price_sell(held_side, bid, ask)
@@ -670,6 +671,7 @@ class RunConfig:
     max_llm_calls: int
     tick_limit: int
     edge_threshold: float
+    edge_exit_threshold: float
     log_level: str
 
 
@@ -776,7 +778,8 @@ def _run_one_tick(
                              if fc.contrarian_prob is not None else None),
         )
         for d in _decide_for_market(m, fc, view, bid, ask, mid,
-                                    edge_threshold=cfg.edge_threshold):
+                                    edge_threshold=cfg.edge_threshold,
+                                    edge_exit_threshold=cfg.edge_exit_threshold):
             decisions.append(d)
             _apply_decision_to_view(view, d)
             _log_decision(m, d, fc)
@@ -847,7 +850,8 @@ def _run_one_tick(
             skipped_low_edge += 1
             continue
         for d in _decide_for_market(m, fc, view, bid, ask, mid,
-                                    edge_threshold=cfg.edge_threshold):
+                                    edge_threshold=cfg.edge_threshold,
+                                    edge_exit_threshold=cfg.edge_exit_threshold):
             decisions.append(d)
             _apply_decision_to_view(view, d)
             if d.flow in ("open", "flip-buy"):
@@ -1042,6 +1046,13 @@ def run() -> None:
         tick_limit=max(0, _env_int("TICK_LIMIT", DEFAULT_TICK_LIMIT)),
         edge_threshold=max(0.0, _env_float("EDGE_THRESHOLD",
                                            EDGE_OPEN_THRESHOLD)),
+        # EDGE_EXIT_THRESHOLD env override (not in CONFIG_JSON so the
+        # config_hash is unaffected). Default keeps the constant.
+        # Negative values are intentional and mean "tolerate small noise":
+        # only exit when held_edge < this (e.g., -0.05 ignores noise
+        # within 5pp, only fires when LLM strongly reverses).
+        edge_exit_threshold=_env_float("EDGE_EXIT_THRESHOLD",
+                                       EDGE_EXIT_THRESHOLD),
         log_level=log_level,
     )
 
@@ -1075,6 +1086,8 @@ def run() -> None:
          tick_limit=cfg.tick_limit,
          edge_threshold=cfg.edge_threshold,
          edge_threshold_default=EDGE_OPEN_THRESHOLD,
+         edge_exit_threshold=cfg.edge_exit_threshold,
+         edge_exit_threshold_default=EDGE_EXIT_THRESHOLD,
          log_level=cfg.log_level)
 
     with BenchmarkSession(api) as session:
