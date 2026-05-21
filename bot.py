@@ -446,11 +446,15 @@ def _effective_prob(p_yes_calibrated: float, side: str) -> float:
 
 
 def _kelly_shares(p_eff: float, fill_price: float, cash_available: float,
-                  market_headroom: float) -> int:
-    """0.25x fractional Kelly converted to integer shares.
+                  market_headroom: float,
+                  kelly_fraction_scale: float = KELLY_FRACTION) -> int:
+    """Fractional Kelly converted to integer shares.
 
     Kelly fraction for a binary contract: edge / (p*(1-p)) where edge is in
-    the chosen side's price space (p_eff - fill_price).
+    the chosen side's price space (p_eff - fill_price). The ``kelly_fraction_scale``
+    is the conservative multiplier (default KELLY_FRACTION = 0.25). It can be
+    overridden at runtime via the KELLY_FRACTION_OVERRIDE env var without
+    changing CONFIG_JSON (so config_hash stays stable).
     """
     if fill_price <= 0.0 or fill_price >= 1.0:
         return 0
@@ -458,7 +462,7 @@ def _kelly_shares(p_eff: float, fill_price: float, cash_available: float,
     if edge <= 0:
         return 0
     kelly_fraction = edge / (fill_price * (1.0 - fill_price))
-    dollar_amount = max(0.0, kelly_fraction * cash_available * KELLY_FRACTION)
+    dollar_amount = max(0.0, kelly_fraction * cash_available * kelly_fraction_scale)
     dollar_amount = min(dollar_amount, market_headroom)
     if dollar_amount <= 0.0:
         return 0
@@ -535,6 +539,7 @@ def _decide_for_market(
     mid: float,
     edge_threshold: float = EDGE_OPEN_THRESHOLD,
     edge_exit_threshold: float = EDGE_EXIT_THRESHOLD,
+    kelly_fraction_scale: float = KELLY_FRACTION,
 ) -> list[Decision]:
     """Produce zero or more intents for a single market.
 
@@ -621,6 +626,7 @@ def _decide_for_market(
         fill_price=fill_price,
         cash_available=view.cash,
         market_headroom=headroom,
+        kelly_fraction_scale=kelly_fraction_scale,
     )
     if shares < MIN_SHARES:
         return out
@@ -672,6 +678,7 @@ class RunConfig:
     tick_limit: int
     edge_threshold: float
     edge_exit_threshold: float
+    kelly_fraction: float
     log_level: str
 
 
@@ -779,7 +786,8 @@ def _run_one_tick(
         )
         for d in _decide_for_market(m, fc, view, bid, ask, mid,
                                     edge_threshold=cfg.edge_threshold,
-                                    edge_exit_threshold=cfg.edge_exit_threshold):
+                                    edge_exit_threshold=cfg.edge_exit_threshold,
+                                    kelly_fraction_scale=cfg.kelly_fraction):
             decisions.append(d)
             _apply_decision_to_view(view, d)
             _log_decision(m, d, fc)
@@ -851,7 +859,8 @@ def _run_one_tick(
             continue
         for d in _decide_for_market(m, fc, view, bid, ask, mid,
                                     edge_threshold=cfg.edge_threshold,
-                                    edge_exit_threshold=cfg.edge_exit_threshold):
+                                    edge_exit_threshold=cfg.edge_exit_threshold,
+                                    kelly_fraction_scale=cfg.kelly_fraction):
             decisions.append(d)
             _apply_decision_to_view(view, d)
             if d.flow in ("open", "flip-buy"):
@@ -1053,6 +1062,11 @@ def run() -> None:
         # within 5pp, only fires when LLM strongly reverses).
         edge_exit_threshold=_env_float("EDGE_EXIT_THRESHOLD",
                                        EDGE_EXIT_THRESHOLD),
+        # KELLY_FRACTION_OVERRIDE env override (not in CONFIG_JSON so the
+        # config_hash is unaffected). Default keeps the constant (0.25).
+        # Set to e.g. 0.05 for smaller, safer positions when un-pausing.
+        kelly_fraction=max(0.0, _env_float("KELLY_FRACTION_OVERRIDE",
+                                            KELLY_FRACTION)),
         log_level=log_level,
     )
 
@@ -1088,6 +1102,8 @@ def run() -> None:
          edge_threshold_default=EDGE_OPEN_THRESHOLD,
          edge_exit_threshold=cfg.edge_exit_threshold,
          edge_exit_threshold_default=EDGE_EXIT_THRESHOLD,
+         kelly_fraction=cfg.kelly_fraction,
+         kelly_fraction_default=KELLY_FRACTION,
          log_level=cfg.log_level)
 
     with BenchmarkSession(api) as session:
